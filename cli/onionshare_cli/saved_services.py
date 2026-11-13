@@ -494,8 +494,8 @@ class SavedServices(object):
             os.close(descriptor)
         try:
             text = b"".join(chunks).decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise SavedServicesError("saved service record is corrupted") from exc
+        except UnicodeDecodeError:
+            raise SavedServicesError("saved service record is corrupted") from None
         record = _parse_record(text)
         if os.path.basename(path) != record["service_id"] + ".json":
             raise SavedServicesError(
