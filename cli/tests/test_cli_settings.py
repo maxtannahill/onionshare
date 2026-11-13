@@ -36,6 +36,7 @@ class TestSettings:
             "bridges_custom": "",
             "bridges_builtin": {},
             "persistent_tabs": [],
+            "saved_services": [],
             "theme": 0,
             "auto_connect": False,
         }
