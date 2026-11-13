@@ -1,4 +1,5 @@
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -740,3 +741,49 @@ class TestSavedServices:
         again = store.list()
         assert [item["service_id"] for item in again] == [good["service_id"]]
         assert again[0]["private_key"] == good["private_key"]
+
+    def test_post_commit_chmod_and_fsync_still_update_settings(
+        self, store, monkeypatch
+    ):
+        sibling = _identity(public=True)
+        identity = _identity(public=True)
+        store.add(sibling, "sibling", saved_at=_SAVED_AT)
+        real_chmod = os.chmod
+
+        def fail_json_chmod(path, mode):
+            if str(path).endswith(".json"):
+                raise OSError(errno.EPERM, "chmod failed")
+            return real_chmod(path, mode)
+
+        def fail_fsync(_directory):
+            raise OSError(errno.EIO, "fsync failed")
+
+        monkeypatch.setattr(saved_services.os, "chmod", fail_json_chmod)
+        monkeypatch.setattr(saved_services, "_fsync_directory", fail_fsync)
+        with pytest.raises(OSError):
+            store.add(identity, "label", saved_at=_SAVED_AT)
+        path = _record_path(store, identity["service_id"])
+        archive = os.path.dirname(path)
+        assert not any(name.startswith(".tmp-") for name in os.listdir(archive))
+        assert stat.S_IMODE(os.lstat(path).st_mode) == 0o600
+        fresh = _reload(store)
+        assert fresh.get("saved_services") == [
+            sibling["service_id"],
+            identity["service_id"],
+        ]
+        listed = store.list()
+        assert [item["service_id"] for item in listed] == [
+            sibling["service_id"],
+            identity["service_id"],
+        ]
+        assert listed[1]["label"] == "label"
+
+        with pytest.raises(OSError):
+            store.delete(identity["service_id"])
+        assert not os.path.lexists(path)
+        assert not any(name.startswith(".tmp-") for name in os.listdir(archive))
+        fresh = _reload(store)
+        assert fresh.get("saved_services") == [sibling["service_id"]]
+        assert [item["service_id"] for item in store.list()] == [
+            sibling["service_id"]
+        ]

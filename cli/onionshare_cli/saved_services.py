@@ -243,12 +243,14 @@ class SavedServices(object):
         path = self._record_path(directory, service_id)
         if (os.path.exists(path) or service_id in ids) and not replace:
             raise SavedServicesError("saved service already exists")
-        self._durable_write(directory, path, _canonical_bytes(record))
+        post = self._durable_write(directory, path, _canonical_bytes(record))
         if service_id not in ids:
             ids.append(service_id)
         self.settings.set("saved_services", ids)
         self.settings.save()
         self.common.log("SavedServices", "add", service_id)
+        if post is not None:
+            raise post
         return record
 
     def list(self):
@@ -297,14 +299,20 @@ class SavedServices(object):
         listed = service_id in ids
         if not link and not regular and not listed:
             raise SavedServicesError("saved service record was not found")
+        post = None
         if link or regular:
             os.unlink(path)
-            _fsync_directory(directory)
+            try:
+                _fsync_directory(directory)
+            except OSError as exc:
+                post = exc
         if listed:
             remaining = [item for item in ids if item != service_id]
             self.settings.set("saved_services", remaining)
             self.settings.save()
         self.common.log("SavedServices", "delete", service_id)
+        if post is not None:
+            raise post
 
     def rename(self, service_id, label):
         """
@@ -319,13 +327,15 @@ class SavedServices(object):
         updated = build_record(identity, new_label, saved_at=current["saved_at"])
         directory = self._archive_dir(create=True)
         path = self._record_path(directory, service_id)
-        self._durable_write(directory, path, _canonical_bytes(updated))
+        post = self._durable_write(directory, path, _canonical_bytes(updated))
         ids = self._saved_id_list()
         if service_id not in ids:
             ids.append(service_id)
         self.settings.set("saved_services", ids)
         self.settings.save()
         self.common.log("SavedServices", "rename", service_id)
+        if post is not None:
+            raise post
         return updated
 
     def _saved_id_list(self):
@@ -449,7 +459,12 @@ class SavedServices(object):
     def _durable_write(self, directory, final_path, payload):
         """
         Write ``payload`` via a temp file in ``directory``, fsync it, then
-        ``os.replace`` onto ``final_path`` and fsync the directory.
+        ``os.replace`` onto ``final_path``.
+
+        ``fchmod`` before replace is the permission guarantee. A later
+        ``chmod`` or directory fsync error is returned, not raised, so the
+        caller can still update ``saved_services`` for the committed file.
+        Errors before replace still propagate and the temp file is removed.
         """
         if os.path.islink(final_path):
             raise SavedServicesError("record file is a symlink")
@@ -470,8 +485,6 @@ class SavedServices(object):
                 raise SavedServicesError("record file is a symlink")
             os.replace(tmp_path, final_path)
             replaced = True
-            os.chmod(final_path, 0o600)
-            _fsync_directory(directory)
         except Exception:
             if not replaced:
                 try:
@@ -479,3 +492,14 @@ class SavedServices(object):
                 except OSError:
                     pass
             raise
+        post = None
+        try:
+            os.chmod(final_path, 0o600)
+        except OSError as exc:
+            post = exc
+        try:
+            _fsync_directory(directory)
+        except OSError as exc:
+            if post is None:
+                post = exc
+        return post
