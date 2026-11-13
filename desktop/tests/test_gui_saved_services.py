@@ -9,6 +9,7 @@ private keys or client-auth keys.
 """
 
 import base64
+import errno
 import hashlib
 import inspect
 import json
@@ -674,6 +675,86 @@ class SavedServicesCase(GuiBaseTest):
                 os.unlink(directory)
             holder.cleanup()
 
+    def run_post_commit_oserror_reloads_table(self):
+        first = _sibling_identity()
+        second = _sibling_identity()
+        archive = SavedServices(self.gui.common, self.gui.common.settings)
+        archive.add(first, "w4-delete")
+        archive.add(second, "w4-rename")
+        alerts = []
+
+        def record_exec(box, *args, **kwargs):
+            alerts.append(box.text())
+            yes = QtWidgets.QMessageBox.StandardButton.Yes
+            if box.standardButtons() & yes:
+                return yes
+            return QtWidgets.QMessageBox.StandardButton.Ok
+
+        def fail_fsync(_directory):
+            raise OSError(errno.EIO, "w4-fsync-eio")
+
+        with mock.patch.object(QtWidgets.QMessageBox, "exec", record_exec):
+            dialog = SavedServicesDialog(self.gui.common, self.gui.tabs)
+            self._dialog = dialog
+            self._select(dialog, first["service_id"])
+            from onionshare_cli import saved_services as saved_services_module
+
+            with mock.patch.object(
+                saved_services_module, "_fsync_directory", fail_fsync
+            ):
+                dialog.delete_selected()
+            if strings._("gui_saved_services_delete_error") not in alerts:
+                raise AssertionError("delete did not show the archive error")
+            self._assert_table_matches_disk(dialog)
+
+            alerts.clear()
+            self._select(dialog, second["service_id"])
+            with mock.patch.object(
+                saved_services_module, "_fsync_directory", fail_fsync
+            ), mock.patch.object(
+                QtWidgets.QInputDialog,
+                "getText",
+                return_value=("w4-renamed", True),
+            ):
+                dialog.rename_selected()
+            if strings._("gui_saved_services_rename_error") not in alerts:
+                raise AssertionError("rename did not show the archive error")
+            self._assert_table_matches_disk(dialog)
+            renamed = False
+            for row in range(dialog.table.rowCount()):
+                item = dialog.table.item(row, 0)
+                if item is not None and item.text() == "w4-renamed":
+                    renamed = True
+            if not renamed:
+                raise AssertionError("reloaded table does not show the new label")
+        captured = self.capsys.readouterr()
+        blobs = self.caplog.text + captured.out + captured.err
+        if "w4-fsync-eio" in blobs:
+            raise AssertionError("fsync error text was logged")
+
+    def _assert_table_matches_disk(self, dialog):
+        self.gui.common.settings.load()
+        listed = []
+        for row in range(dialog.table.rowCount()):
+            item = dialog.table.item(row, 0)
+            if item is None:
+                continue
+            service_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            listed.append(service_id)
+        on_disk = list(self.gui.common.settings.get("saved_services"))
+        if listed != on_disk:
+            raise AssertionError("table does not match saved_services")
+        directory = os.path.join(self.gui.common.build_data_dir(), "saved_services")
+        names = []
+        if os.path.isdir(directory) and not os.path.islink(directory):
+            names = [
+                name[: -len(".json")]
+                for name in os.listdir(directory)
+                if name.endswith(".json")
+            ]
+        if sorted(listed) != sorted(names):
+            raise AssertionError("table does not match archive files")
+
 
 @pytest.fixture(scope="module")
 def saved_services_case():
@@ -691,6 +772,19 @@ def test_symlinked_archive_directory_shows_list_error(
     case.setUp()
     try:
         case.run_symlinked_archive_list_error()
+    finally:
+        case.tearDown()
+
+
+def test_post_commit_oserror_reloads_saved_services_table(
+    saved_services_case, caplog, capsys
+):
+    case = saved_services_case("run_post_commit_oserror_reloads_table")
+    case.caplog = caplog
+    case.capsys = capsys
+    case.setUp()
+    try:
+        case.run_post_commit_oserror_reloads_table()
     finally:
         case.tearDown()
 

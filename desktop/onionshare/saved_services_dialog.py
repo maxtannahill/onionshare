@@ -305,7 +305,8 @@ class SavedServicesDialog(QtWidgets.QDialog):
                     strings._("gui_saved_services_rename_error"),
                 ),
             )
-            return
+        except Exception:
+            Alert(self.common, strings._("gui_saved_services_rename_error"))
         self.reload()
         self._select_service_id(service_id)
 
@@ -336,7 +337,8 @@ class SavedServicesDialog(QtWidgets.QDialog):
             SavedServices(self.common, self.common.settings).delete(service_id)
         except SavedServicesError:
             Alert(self.common, strings._("gui_saved_services_delete_error"))
-            return
+        except Exception:
+            Alert(self.common, strings._("gui_saved_services_delete_error"))
         self.reload()
 
     def _selected_service_id(self):
