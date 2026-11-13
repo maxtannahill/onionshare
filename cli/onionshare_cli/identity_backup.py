@@ -101,6 +101,15 @@ class IdentityBackupError(Exception):
         super().__init__(self._MESSAGE)
 
 
+def _raise_identity_backup_error():
+    """Raise the generic error outside any except handler.
+
+    This frame holds neither a key nor plaintext. Raising here leaves
+    __context__ and __cause__ unset.
+    """
+    raise IdentityBackupError()
+
+
 def _reject():
     raise IdentityBackupError()
 
@@ -295,12 +304,17 @@ def generate_passphrase():
 
 def validate_identity(identity):
     """Return a new six-key identity, or raise IdentityBackupError."""
+    failed = True
+    result = None
     try:
-        return _validate_identity(identity)
-    except IdentityBackupError:
-        raise
+        result = _validate_identity(identity)
+        failed = False
     except Exception:
-        raise IdentityBackupError() from None
+        result = None
+    identity = None
+    if failed:
+        _raise_identity_backup_error()
+    return result
 
 
 def identity_from_mode_settings(mode_settings):
@@ -309,6 +323,20 @@ def identity_from_mode_settings(mode_settings):
     Reads persistent.mode, general.service_id, onion.private_key,
     onion.client_auth_priv_key, onion.client_auth_pub_key, and general.public.
     """
+    failed = True
+    result = None
+    try:
+        result = _identity_from_mode_settings(mode_settings)
+        failed = False
+    except Exception:
+        result = None
+    mode_settings = None
+    if failed:
+        _raise_identity_backup_error()
+    return result
+
+
+def _identity_from_mode_settings(mode_settings):
     try:
         identity = {
             "mode": mode_settings.get("persistent", "mode"),
@@ -327,6 +355,21 @@ def identity_from_mode_settings(mode_settings):
 
 def encrypt_identity(identity, passphrase):
     """Encrypt an identity. The result is canonical JSON with no trailing newline."""
+    failed = True
+    result = None
+    try:
+        result = _encrypt_identity(identity, passphrase)
+        failed = False
+    except Exception:
+        result = None
+    identity = None
+    passphrase = None
+    if failed:
+        _raise_identity_backup_error()
+    return result
+
+
+def _encrypt_identity(identity, passphrase):
     checked = validate_identity(identity)
     if type(passphrase) is not str:
         _reject()
@@ -358,6 +401,21 @@ def encrypt_identity(identity, passphrase):
 
 def decrypt_identity(text, passphrase):
     """Decrypt an envelope and return the validated identity."""
+    failed = True
+    result = None
+    try:
+        result = _decrypt_identity(text, passphrase)
+        failed = False
+    except Exception:
+        result = None
+    text = None
+    passphrase = None
+    if failed:
+        _raise_identity_backup_error()
+    return result
+
+
+def _decrypt_identity(text, passphrase):
     if type(text) is not str or type(passphrase) is not str:
         _reject()
     # UTF-8 length is measured inside the generic handler. A lone surrogate

@@ -100,8 +100,69 @@ class EncryptIdentityThread(QtCore.QThread):
 
 
 # One timed wait for the Argon2id worker. Interactive KDF is far shorter than
-# this; if it is still running afterwards the dialog stays open.
+# this; if it is still running afterwards a user close stays open. Quit and
+# DeferredDelete leave the worker disconnected and keep the QThread alive.
 _ENCRYPT_THREAD_WAIT_MS = 180000
+
+
+class _AbandonedThreadKeeper(QtCore.QObject):
+    """Hold QThreads that outlive the dialog so Qt does not abort on quit."""
+
+    def __init__(self):
+        super(_AbandonedThreadKeeper, self).__init__()
+        self._threads = []
+
+    def retain(self, thread):
+        if thread not in self._threads:
+            self._threads.append(thread)
+            try:
+                thread.finished.connect(
+                    self._release, QtCore.Qt.ConnectionType.QueuedConnection
+                )
+            except RuntimeError:
+                pass
+        self._release_if_finished(thread)
+
+    def _release(self):
+        self._release_thread(self.sender())
+
+    def _release_if_finished(self, thread):
+        try:
+            finished = bool(thread.isFinished())
+        except RuntimeError:
+            return
+        if finished:
+            self._release_thread(thread)
+
+    def _release_thread(self, thread):
+        if thread is None:
+            return
+        try:
+            if hasattr(thread, "_identity"):
+                thread._identity = None
+        except RuntimeError:
+            pass
+        try:
+            self._threads.remove(thread)
+        except ValueError:
+            pass
+        try:
+            thread.deleteLater()
+        except RuntimeError:
+            pass
+
+
+_abandoned_thread_keeper = None
+
+
+def _retain_thread(thread):
+    """Keep a running QThread referenced until its finished signal."""
+    global _abandoned_thread_keeper
+    if thread is None:
+        return
+    if _abandoned_thread_keeper is None:
+        _abandoned_thread_keeper = _AbandonedThreadKeeper()
+    _abandoned_thread_keeper.retain(thread)
 
 
 def _fsync_directory(directory):
@@ -468,13 +529,15 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
                 continue
         return False
 
-    def shutdown_encrypt_thread(self):
+    def shutdown_encrypt_thread(self, abandon=False):
         """
         Stop accepting encrypt results and wait until the worker has finished.
 
         accept, reject, and closeEvent all use this. A nested call (closeEvent
-        leading into reject) does not wait a second time. A timed-out wait
-        leaves the dialog open and accepting results again.
+        leading into reject) does not wait a second time. A timed-out user
+        close leaves the dialog open and accepting results again. Quit and
+        DeferredDelete pass abandon=True: the worker stays disconnected and a
+        still-running QThread is kept alive until it finishes.
         Returns True when no encrypt thread is still running.
         """
         if self._shutdown_complete:
@@ -488,6 +551,7 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         for thread in threads:
             self._disconnect_thread(thread)
 
+        abandoned = False
         for thread in threads:
             try:
                 running = thread.isRunning()
@@ -501,20 +565,49 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
             except RuntimeError:
                 still_running = False
             if not finished or still_running:
+                if abandon:
+                    try:
+                        if hasattr(thread, "_identity"):
+                            thread._identity = None
+                    except RuntimeError:
+                        pass
+                    _retain_thread(thread)
+                    abandoned = True
+                    continue
                 self._shutting_down = False
                 self._accepting_results = True
                 self._reconnect_thread(self.encrypt_thread)
                 return False
 
+        if abandoned:
+            # Do not reconnect. A later close must not wait or re-arm.
+            self._accepting_results = False
+            self._shutting_down = False
+            self._shutdown_complete = True
+            return False
+
         self._shutdown_complete = True
         self._shutting_down = False
         return True
+
+    def _clear_sensitive_fields(self):
+        """Drop identity and passphrase references. This does not zero memory."""
+        self.identity = None
+        self.passphrase = None
+        self._next_passphrase = None
+        label = getattr(self, "passphrase_label", None)
+        if label is not None:
+            try:
+                label.setText("")
+            except RuntimeError:
+                pass
 
     def accept(self):
         if self._close_in_progress:
             return
         if not self.shutdown_encrypt_thread():
             return
+        self._clear_sensitive_fields()
         self._close_in_progress = True
         super(ExportIdentityBackupDialog, self).accept()
 
@@ -522,10 +615,12 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         # closeEvent's QDialog implementation calls reject. The outer close
         # already waited; calling wait again from here would nest.
         if self._close_in_progress:
+            self._clear_sensitive_fields()
             super(ExportIdentityBackupDialog, self).reject()
             return
         if not self.shutdown_encrypt_thread():
             return
+        self._clear_sensitive_fields()
         self._close_in_progress = True
         super(ExportIdentityBackupDialog, self).reject()
 
@@ -536,6 +631,7 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         if not self.shutdown_encrypt_thread():
             event.ignore()
             return
+        self._clear_sensitive_fields()
         self._close_in_progress = True
         super(ExportIdentityBackupDialog, self).closeEvent(event)
 

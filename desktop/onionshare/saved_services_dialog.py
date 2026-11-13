@@ -195,17 +195,18 @@ class SavedServicesDialog(QtWidgets.QDialog):
         self.import_dialog.exec()
         self.reload()
 
-    def shutdown_identity_import(self):
+    def shutdown_identity_import(self, abandon=False):
         """
         Wait out an in-progress import decrypt before this dialog is destroyed.
 
         Returns False when the worker is still running after the timed wait.
+        A user close leaves ``abandon`` false. Quit passes true.
         """
         dialog = self.import_dialog
         if dialog is None:
             return True
         try:
-            return dialog.shutdown_decrypt_thread()
+            return dialog.shutdown_decrypt_thread(abandon=abandon)
         except RuntimeError:
             return True
 
@@ -304,7 +305,8 @@ class SavedServicesDialog(QtWidgets.QDialog):
                     strings._("gui_saved_services_rename_error"),
                 ),
             )
-            return
+        except Exception:
+            Alert(self.common, strings._("gui_saved_services_rename_error"))
         self.reload()
         self._select_service_id(service_id)
 
@@ -335,7 +337,8 @@ class SavedServicesDialog(QtWidgets.QDialog):
             SavedServices(self.common, self.common.settings).delete(service_id)
         except SavedServicesError:
             Alert(self.common, strings._("gui_saved_services_delete_error"))
-            return
+        except Exception:
+            Alert(self.common, strings._("gui_saved_services_delete_error"))
         self.reload()
 
     def _selected_service_id(self):

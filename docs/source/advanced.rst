@@ -49,7 +49,7 @@ Import a backup
 Open the Settings tab and click "Saved Services…", then "Import backup…".
 Choose a backup file, or paste the backup text, and type the passphrase as one hyphen-joined string.
 OnionShare does not split that string on hyphens.
-Only spaces before or after the passphrase are ignored.
+Leading and trailing whitespace around the passphrase is ignored.
 
 A successful import saves the identity in Saved Services and opens it in a new tab.
 That tab is stopped.
