@@ -662,7 +662,6 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         layout.setSpacing(12)
         layout.addWidget(self.instructions)
         layout.addWidget(self.local_encryption_label)
-        layout.addSpacing(4)
         layout.addWidget(self.recovery_group)
         layout.addWidget(self.encrypted_group)
         layout.addWidget(self.status_label)
