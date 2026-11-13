@@ -244,8 +244,8 @@ def _parse_record(text):
         )
     except SavedServicesError:
         raise
-    except json.JSONDecodeError:
-        raise SavedServicesError("saved service record is corrupted")
+    except Exception:
+        raise SavedServicesError("saved service record is corrupted") from None
     if type(value) is not dict:
         raise SavedServicesError("saved service record must be a JSON object")
     if set(value) != set(_RECORD_KEYS):
