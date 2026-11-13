@@ -113,17 +113,35 @@ class _AbandonedThreadKeeper(QtCore.QObject):
         self._threads = []
 
     def retain(self, thread):
-        if thread in self._threads:
-            return
-        self._threads.append(thread)
-        thread.finished.connect(
-            self._release, QtCore.Qt.ConnectionType.QueuedConnection
-        )
+        if thread not in self._threads:
+            self._threads.append(thread)
+            try:
+                thread.finished.connect(
+                    self._release, QtCore.Qt.ConnectionType.QueuedConnection
+                )
+            except RuntimeError:
+                pass
+        self._release_if_finished(thread)
 
     def _release(self):
-        thread = self.sender()
+        self._release_thread(self.sender())
+
+    def _release_if_finished(self, thread):
+        try:
+            finished = bool(thread.isFinished())
+        except RuntimeError:
+            return
+        if finished:
+            self._release_thread(thread)
+
+    def _release_thread(self, thread):
         if thread is None:
             return
+        try:
+            if hasattr(thread, "_identity"):
+                thread._identity = None
+        except RuntimeError:
+            pass
         try:
             self._threads.remove(thread)
         except ValueError:
@@ -548,6 +566,11 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
                 still_running = False
             if not finished or still_running:
                 if abandon:
+                    try:
+                        if hasattr(thread, "_identity"):
+                            thread._identity = None
+                    except RuntimeError:
+                        pass
                     _retain_thread(thread)
                     abandoned = True
                     continue

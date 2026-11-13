@@ -1278,6 +1278,42 @@ class TestIdentityBackupGui(GuiBaseTest):
             raise AssertionError("passphrase field was not cleared")
         dialog.deleteLater()
 
+    def test_abandon_releases_keeper_when_wait_misses_finished_worker(self):
+        """wait() reports a timeout after the worker has already finished."""
+
+        def fast(text, passphrase):
+            return {"discarded": True}
+
+        dialog = ImportIdentityDialog(self.gui.common, self.gui.tabs)
+        try:
+            with mock.patch.object(
+                identity_import_dialog, "decrypt_identity", fast
+            ):
+                thread = identity_import_dialog.DecryptIdentityThread(
+                    "{}", "not-used"
+                )
+                thread.success.connect(dialog._decrypt_succeeded)
+                thread.error.connect(dialog._decrypt_failed)
+                thread.start()
+                thread.wait(5000)
+            if thread._identity is None:
+                raise AssertionError("worker did not keep a result to discard")
+            thread.isRunning = lambda: True
+            thread.wait = lambda _timeout: False
+            dialog.decrypt_thread = thread
+            dialog.decrypt_threads = [thread]
+            dialog.shutdown_decrypt_thread(abandon=True)
+            keeper = identity_import_dialog._abandoned_thread_keeper
+            if keeper is None or thread in keeper._threads:
+                raise AssertionError("abandon keeper was not released")
+            if thread._identity is not None:
+                raise AssertionError("worker kept a discarded identity")
+        finally:
+            try:
+                dialog.close()
+            except RuntimeError:
+                pass
+
     def test_shutdown_during_successful_decrypt_drops_worker_identity(self):
         started = threading.Event()
 
