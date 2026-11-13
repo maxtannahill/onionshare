@@ -20,6 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from PySide6 import QtCore, QtWidgets, QtGui
 
+from onionshare_cli.identity_backup import IdentityBackupError, validate_identity
 from onionshare_cli.mode_settings import ModeSettings
 
 from . import strings
@@ -28,6 +29,7 @@ from .threads import EventHandlerThread
 from .gui_common import GuiCommon
 from .settings_parent_tab import SettingsParentTab
 from .connection_tab import AutoConnectTab
+from .widgets import Alert
 
 
 class TabWidget(QtWidgets.QTabWidget):
@@ -96,6 +98,13 @@ class TabWidget(QtWidgets.QTabWidget):
         self.event_handler_t.should_quit = True
         self.event_handler_t.quit()
         self.event_handler_t.wait(50)
+
+        # An import decrypt must finish before the settings tab is destroyed.
+        # A timed-out wait does not stop quitting, matching other cleanup.
+        for tab_id in self.tabs:
+            tab = self.tabs[tab_id]
+            if type(tab) is SettingsParentTab:
+                self._shutdown_settings_import(tab, abandon=True)
 
         # Clean up each tab
         for tab_id in self.tabs:
@@ -229,6 +238,135 @@ class TabWidget(QtWidgets.QTabWidget):
         # Bring the window to front, in case this is being added by an event
         self.bring_to_front.emit()
 
+    def open_saved_service(self, identity, label=None):
+        """
+        Open a six-key identity as a new stopped tab.
+
+        Prompt 5 (import from a file or pasted text) calls this and does not
+        open a tab itself::
+
+            tab = tab_widget.open_saved_service(identity, label=None)
+
+        ``identity`` is the six-key dict (``mode``, ``service_id``,
+        ``private_key``, ``client_auth_priv_key``, ``client_auth_pub_key``,
+        ``public``). It is re-validated here. This method does not decrypt,
+        does not read or write an archive record, and does not call
+        ``start_server``.
+
+        ``label`` is accepted so the manager and Prompt 5 can pass an archive
+        label. It is not written into ModeSettings, not logged, and not
+        required. Titles, filenames, and autostart stay at the new-tab
+        defaults.
+
+        Returns the new ``Tab``, or ``None`` when the identity is rejected or
+        a tab with the same ``general.service_id`` is already open. That
+        match includes a persistent tab and a tab whose server is running.
+        On a duplicate, neither service is started or stopped, and an archive
+        record the caller already wrote is left as it is.
+
+        ``persistent.enabled`` and ``persistent.autostart_on_launch`` are
+        forced False on the new ModeSettings before ``add_tab`` constructs
+        the Mode. Fields are assigned on ``_settings`` directly.
+        ``ModeSettings.set`` is not used, because it logs the value and
+        calls ``save``. ``general.autostart_timer`` is forced False as well;
+        there is no ``general.autostart_on_launch`` setting. A temporary
+        ``save`` stand-in covers setter side effects inside ``add_tab`` (the
+        existing empty-title update) so ``ModeSettings.save`` does not run
+        and ``persistent/<id>.json`` is not created. ``save_persistent_tabs``
+        only records tabs with persistence enabled, so this tab stays out of
+        ``persistent_tabs``.
+        """
+        self.common.log("TabWidget", "open_saved_service")
+        if label is not None and type(label) is not str:
+            self.common.log("TabWidget", "open_saved_service", "rejected")
+            Alert(self.common, strings._("gui_saved_services_open_error"))
+            return None
+
+        try:
+            checked = validate_identity(identity)
+        except IdentityBackupError:
+            self.common.log("TabWidget", "open_saved_service", "rejected")
+            Alert(self.common, strings._("gui_saved_services_open_error"))
+            return None
+
+        if self._tab_for_service_id(checked["service_id"]) is not None:
+            self.common.log("TabWidget", "open_saved_service", "duplicate")
+            Alert(
+                self.common,
+                strings._("gui_saved_services_duplicate"),
+                QtWidgets.QMessageBox.Icon.Warning,
+            )
+            return None
+
+        mode_settings = ModeSettings(self.common)
+        self._apply_stopped_identity(mode_settings, checked)
+
+        def block_save():
+            # add_tab's title setter calls save(). Do not write, and do not
+            # log the settings. Persistence stays off for this open.
+            return None
+
+        tab = None
+        mode_settings.save = block_save
+        try:
+            existing = set(self.tabs)
+            self.add_tab(mode_settings)
+            added = [tab_id for tab_id in self.tabs if tab_id not in existing]
+            if added:
+                tab = self.tabs[added[-1]]
+        finally:
+            self._force_stopped_flags(mode_settings)
+            if "save" in mode_settings.__dict__:
+                del mode_settings.save
+        return tab
+
+    def _tab_for_service_id(self, service_id):
+        """
+        Return an open tab whose onion service id matches.
+
+        Persistent tabs and tabs with a running server are included. The
+        match key is ``general.service_id`` only. Settings and connection
+        tabs are skipped. Nothing on the tab is started, stopped, or logged.
+        """
+        for tab in self.tabs.values():
+            if type(tab) is SettingsParentTab or type(tab) is AutoConnectTab:
+                continue
+            settings = getattr(tab, "settings", None)
+            if settings is None:
+                continue
+            try:
+                current = settings.get("general", "service_id")
+            except Exception:
+                continue
+            if current == service_id:
+                return tab
+        return None
+
+    def _apply_stopped_identity(self, mode_settings, identity):
+        """
+        Copy identity fields onto a new ModeSettings without set() or save().
+
+        The stopped flags are written first and again after the identity,
+        before the caller constructs the Mode.
+        """
+        self._force_stopped_flags(mode_settings)
+        mode_settings._settings["persistent"]["mode"] = identity["mode"]
+        general = mode_settings._settings["general"]
+        general["service_id"] = identity["service_id"]
+        general["public"] = identity["public"]
+        onion = mode_settings._settings["onion"]
+        onion["private_key"] = identity["private_key"]
+        onion["client_auth_priv_key"] = identity["client_auth_priv_key"]
+        onion["client_auth_pub_key"] = identity["client_auth_pub_key"]
+        self._force_stopped_flags(mode_settings)
+
+    def _force_stopped_flags(self, mode_settings):
+        """Force the autostart gate off without calling set() or save()."""
+        persistent = mode_settings._settings["persistent"]
+        persistent["enabled"] = False
+        persistent["autostart_on_launch"] = False
+        mode_settings._settings["general"]["autostart_timer"] = False
+
     def open_connection_tab(self):
         self.common.log("TabWidget", "open_connection_tab")
 
@@ -354,6 +492,13 @@ class TabWidget(QtWidgets.QTabWidget):
             self.common.log("TabWidget", "closing a settings tab")
 
             if type(self.tabs[tab_id]) is SettingsParentTab:
+                if not self._shutdown_settings_import(tab):
+                    self.common.log(
+                        "TabWidget",
+                        "close_tab",
+                        "identity import still running, keeping the settings tab open",
+                    )
+                    return
                 self.tor_settings_tab = None
 
             # Remove the tab
@@ -385,6 +530,22 @@ class TabWidget(QtWidgets.QTabWidget):
                     self.new_tab_clicked()
             else:
                 self.common.log("TabWidget", "user does not want to close the tab")
+
+    def _shutdown_settings_import(self, settings_parent, abandon=False):
+        """
+        Wait out an identity-import decrypt before a settings tab is destroyed.
+
+        Returns False when the worker is still running after the timed wait.
+        Quit passes ``abandon`` so the worker stays disconnected. A user close
+        leaves it false and keeps the settings tab open.
+        """
+        shutdown = getattr(settings_parent, "shutdown_identity_import", None)
+        if shutdown is None:
+            return True
+        try:
+            return shutdown(abandon)
+        except RuntimeError:
+            return True
 
     def close_connection_tab(self):
         self.common.log("TabWidget", "close_connection_tab")
