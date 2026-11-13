@@ -207,6 +207,53 @@ def _fsync_directory(directory):
         os.close(descriptor)
 
 
+def _clear_dialog_passphrase_clipboard(dialog):
+    """
+    Clear the clipboard when it still holds ``dialog``'s recovery phrase.
+
+    Used when the dialog is destroyed without going through close. The phrase
+    is read from the dialog and is not stored again.
+    """
+    try:
+        clipboard = QtWidgets.QApplication.clipboard()
+    except Exception:
+        return
+    try:
+        phrase = getattr(dialog, "passphrase", None)
+    except Exception:
+        return
+    _clear_clipboard_if_text(clipboard, phrase)
+
+
+def _clear_clipboard_if_text(clipboard, phrase):
+    """
+    Clear clipboard text that is still ``phrase``.
+
+    ``phrase`` is the recovery phrase the dialog is showing. It is compared
+    in place and not stored again. Other clipboard text is left alone. The
+    selection clipboard is cleared only on platforms where Qt supports it,
+    and only when that selection is still the phrase.
+    """
+    if type(phrase) is not str or phrase == "" or clipboard is None:
+        return
+    modes = [QtGui.QClipboard.Mode.Clipboard]
+    try:
+        if clipboard.supportsSelection():
+            modes.append(QtGui.QClipboard.Mode.Selection)
+    except Exception:
+        pass
+    for mode in modes:
+        try:
+            current = clipboard.text(mode)
+        except Exception:
+            continue
+        if current == phrase:
+            try:
+                clipboard.clear(mode)
+            except Exception:
+                pass
+
+
 def _write_exact_bytes(path, payload):
     """
     Replace ``path`` with ``payload`` via a temp file in the same directory.
@@ -422,6 +469,12 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         self._shutting_down = False
         self._shutdown_complete = False
         self._close_in_progress = False
+        # A bound method is disconnected before destroyed runs. The default
+        # argument keeps this dialog reachable so the phrase can be compared
+        # without storing a second copy of it.
+        self.destroyed.connect(
+            lambda *args, dialog=self: _clear_dialog_passphrase_clipboard(dialog)
+        )
 
         self.common.log("ExportIdentityBackupDialog", "__init__")
 
@@ -722,10 +775,15 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         """
         New passphrase, new salt, and new nonce. Replaces the QR and the
         pending save payload only after the new envelope is ready.
+
+        The outgoing phrase is dropped from the clipboard first when the
+        clipboard still holds it, so a later reader does not keep the phrase
+        for the envelope that is about to be replaced.
         """
         if self.is_busy:
             return
         self.common.log("ExportIdentityBackupDialog", "regenerate_passphrase")
+        self._clear_copied_passphrase()
         self._start_encryption(generate_passphrase())
 
     def save_to_file(self):
@@ -878,8 +936,13 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         self._shutting_down = False
         return True
 
+    def _clear_copied_passphrase(self):
+        """Clear the clipboard when it still holds the phrase this dialog shows."""
+        _clear_dialog_passphrase_clipboard(self)
+
     def _clear_sensitive_fields(self):
         """Drop identity and passphrase references. This does not zero memory."""
+        self._clear_copied_passphrase()
         self.identity = None
         self.passphrase = None
         self._next_passphrase = None

@@ -1272,6 +1272,162 @@ class TestIdentityBackupGui(GuiBaseTest):
         if dialog.passphrase_label.text() != "":
             raise AssertionError("passphrase label was not cleared")
 
+    def _assert_clipboard_empty(self, clipboard):
+        """Fail without echoing clipboard text. It may be the recovery phrase."""
+        if clipboard.text() != "":
+            raise AssertionError("clipboard was not empty")
+        try:
+            supports_selection = clipboard.supportsSelection()
+        except Exception:
+            supports_selection = False
+        if supports_selection:
+            selection = clipboard.text(QtGui.QClipboard.Mode.Selection)
+            if selection != "":
+                raise AssertionError("selection clipboard was not empty")
+
+    def test_copied_passphrase_is_cleared_on_close_and_regenerate(self):
+        """
+        Copy must not leave the recovery phrase on the clipboard after the
+        dialog closes, is destroyed, or regenerates. Unrelated clipboard
+        text, including the envelope, stays put.
+        """
+
+        def fast(identity, passphrase):
+            return "{}"
+
+        clipboard = QtWidgets.QApplication.clipboard()
+        clipboard.clear()
+        self.gui.qtapp.processEvents()
+        with mock.patch.object(identity_backup_dialog, "encrypt_identity", fast):
+            dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                self.gui.common,
+                _fixture_identity(),
+                "alpha-bravo-charlie-delta-echo-foxtrot",
+            )
+            self._dialog = dialog
+            self._wait_until(
+                lambda: (not dialog.is_busy) and dialog.passphrase_label.text() != ""
+            )
+            dialog.copy_passphrase_button.click()
+            if clipboard.text() != dialog.passphrase:
+                raise AssertionError("copy did not place the recovery phrase")
+            dialog.reject()
+            self._assert_clipboard_empty(clipboard)
+            if (
+                dialog.passphrase is not None
+                or dialog.passphrase_label.text() != ""
+            ):
+                raise AssertionError("reject left the recovery phrase in the dialog")
+
+            dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                self.gui.common,
+                _fixture_identity(),
+                "alpha-bravo-charlie-delta-echo-foxtrot",
+            )
+            self._dialog = dialog
+            self._wait_until(
+                lambda: (not dialog.is_busy) and dialog.passphrase_label.text() != ""
+            )
+            dialog.copy_passphrase_button.click()
+            previous = dialog.passphrase
+            generation = dialog.generation
+            dialog.regenerate_button.click()
+            if clipboard.text() == previous or clipboard.text() != "":
+                raise AssertionError(
+                    "regenerate left the previous recovery phrase on the clipboard"
+                )
+            self._wait_until(
+                lambda: dialog.generation > generation and not dialog.is_busy
+            )
+            if clipboard.text() == previous or clipboard.text() != "":
+                raise AssertionError(
+                    "clipboard held the previous recovery phrase after regenerate"
+                )
+            if dialog.passphrase == previous:
+                raise AssertionError("regenerate did not replace the recovery phrase")
+            dialog.reject()
+
+            dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                self.gui.common,
+                _fixture_identity(),
+                "alpha-bravo-charlie-delta-echo-foxtrot",
+            )
+            self._dialog = dialog
+            self._wait_until(
+                lambda: (not dialog.is_busy) and dialog.passphrase_label.text() != ""
+            )
+            clipboard.setText("unrelated-clipboard-text")
+            dialog.reject()
+            if clipboard.text() != "unrelated-clipboard-text":
+                raise AssertionError("unrelated clipboard text was replaced")
+
+            dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                self.gui.common,
+                _fixture_identity(),
+                "alpha-bravo-charlie-delta-echo-foxtrot",
+            )
+            self._dialog = dialog
+            self._wait_until(
+                lambda: (not dialog.is_busy) and dialog.passphrase_label.text() != ""
+            )
+            dialog.copy_passphrase_button.click()
+            dialog.copy_encrypted_button.click()
+            if clipboard.text() != dialog.qr_text:
+                raise AssertionError("copy encrypted text did not update the clipboard")
+            dialog.close_button.click()
+            if clipboard.text() != "{}":
+                raise AssertionError("close cleared clipboard text that was not the phrase")
+
+            dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                self.gui.common,
+                _fixture_identity(),
+                "alpha-bravo-charlie-delta-echo-foxtrot",
+            )
+            self._dialog = dialog
+            self._wait_until(
+                lambda: (not dialog.is_busy) and dialog.passphrase_label.text() != ""
+            )
+            dialog.copy_passphrase_button.click()
+            phrase = dialog.passphrase
+
+            class _ClipboardDouble(object):
+                def __init__(self):
+                    self.values = {
+                        QtGui.QClipboard.Mode.Clipboard: "unrelated-clipboard-text",
+                        QtGui.QClipboard.Mode.Selection: phrase,
+                    }
+
+                def supportsSelection(self):
+                    return True
+
+                def text(self, mode=QtGui.QClipboard.Mode.Clipboard):
+                    return self.values.get(mode, "")
+
+                def clear(self, mode=QtGui.QClipboard.Mode.Clipboard):
+                    self.values[mode] = ""
+
+            double = _ClipboardDouble()
+            with mock.patch.object(
+                QtWidgets.QApplication, "clipboard", return_value=double
+            ):
+                dialog.deleteLater()
+                QtCore.QCoreApplication.sendPostedEvents(
+                    None, QtCore.QEvent.Type.DeferredDelete
+                )
+            if isValid(dialog):
+                raise AssertionError("dialog was not destroyed")
+            if double.text(QtGui.QClipboard.Mode.Selection) != "":
+                raise AssertionError(
+                    "destroy left the recovery phrase on the selection clipboard"
+                )
+            if double.text() != "unrelated-clipboard-text":
+                raise AssertionError(
+                    "destroy cleared clipboard text that was not the phrase"
+                )
+            self._dialog = None
+            clipboard.clear()
+            self.gui.qtapp.processEvents()
+
     def test_reject_clears_import_passphrase(self):
         dialog = ImportIdentityDialog(self.gui.common, self.gui.tabs)
         dialog.passphrase_edit.setText("alpha-bravo-charlie-delta-echo-foxtrot")
