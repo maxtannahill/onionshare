@@ -230,21 +230,22 @@ class ModeSettingsWidget(QtWidgets.QScrollArea):
         # deleteLater delivers DeferredDelete before the C++ object is destroyed.
         # Finish a live export thread here so the worker is not destroyed mid-run.
         if event.type() == QtCore.QEvent.Type.DeferredDelete:
-            self.shutdown_identity_backup()
+            self.shutdown_identity_backup(abandon=True)
         return super(ModeSettingsWidget, self).event(event)
 
-    def shutdown_identity_backup(self):
+    def shutdown_identity_backup(self, abandon=False):
         """
         Wait out any export encryption before this widget or its tab is destroyed.
 
         Returns False when the worker is still running after the timed wait.
-        The caller should keep the tab open in that case.
+        A user close should keep the tab open in that case. Quit passes
+        ``abandon`` so the worker stays disconnected.
         """
         dialog = getattr(self, "identity_backup_dialog", None)
         if dialog is None:
             return True
         try:
-            return dialog.shutdown_encrypt_thread()
+            return dialog.shutdown_encrypt_thread(abandon=abandon)
         except RuntimeError:
             return True
 

@@ -100,8 +100,51 @@ class EncryptIdentityThread(QtCore.QThread):
 
 
 # One timed wait for the Argon2id worker. Interactive KDF is far shorter than
-# this; if it is still running afterwards the dialog stays open.
+# this; if it is still running afterwards a user close stays open. Quit and
+# DeferredDelete leave the worker disconnected and keep the QThread alive.
 _ENCRYPT_THREAD_WAIT_MS = 180000
+
+
+class _AbandonedThreadKeeper(QtCore.QObject):
+    """Hold QThreads that outlive the dialog so Qt does not abort on quit."""
+
+    def __init__(self):
+        super(_AbandonedThreadKeeper, self).__init__()
+        self._threads = []
+
+    def retain(self, thread):
+        if thread in self._threads:
+            return
+        self._threads.append(thread)
+        thread.finished.connect(
+            self._release, QtCore.Qt.ConnectionType.QueuedConnection
+        )
+
+    def _release(self):
+        thread = self.sender()
+        if thread is None:
+            return
+        try:
+            self._threads.remove(thread)
+        except ValueError:
+            pass
+        try:
+            thread.deleteLater()
+        except RuntimeError:
+            pass
+
+
+_abandoned_thread_keeper = None
+
+
+def _retain_thread(thread):
+    """Keep a running QThread referenced until its finished signal."""
+    global _abandoned_thread_keeper
+    if thread is None:
+        return
+    if _abandoned_thread_keeper is None:
+        _abandoned_thread_keeper = _AbandonedThreadKeeper()
+    _abandoned_thread_keeper.retain(thread)
 
 
 def _fsync_directory(directory):
@@ -468,13 +511,15 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
                 continue
         return False
 
-    def shutdown_encrypt_thread(self):
+    def shutdown_encrypt_thread(self, abandon=False):
         """
         Stop accepting encrypt results and wait until the worker has finished.
 
         accept, reject, and closeEvent all use this. A nested call (closeEvent
-        leading into reject) does not wait a second time. A timed-out wait
-        leaves the dialog open and accepting results again.
+        leading into reject) does not wait a second time. A timed-out user
+        close leaves the dialog open and accepting results again. Quit and
+        DeferredDelete pass abandon=True: the worker stays disconnected and a
+        still-running QThread is kept alive until it finishes.
         Returns True when no encrypt thread is still running.
         """
         if self._shutdown_complete:
@@ -488,6 +533,7 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         for thread in threads:
             self._disconnect_thread(thread)
 
+        abandoned = False
         for thread in threads:
             try:
                 running = thread.isRunning()
@@ -501,10 +547,21 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
             except RuntimeError:
                 still_running = False
             if not finished or still_running:
+                if abandon:
+                    _retain_thread(thread)
+                    abandoned = True
+                    continue
                 self._shutting_down = False
                 self._accepting_results = True
                 self._reconnect_thread(self.encrypt_thread)
                 return False
+
+        if abandoned:
+            # Do not reconnect. A later close must not wait or re-arm.
+            self._accepting_results = False
+            self._shutting_down = False
+            self._shutdown_complete = True
+            return False
 
         self._shutdown_complete = True
         self._shutting_down = False
