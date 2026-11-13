@@ -99,6 +99,13 @@ class TabWidget(QtWidgets.QTabWidget):
         self.event_handler_t.quit()
         self.event_handler_t.wait(50)
 
+        # An import decrypt must finish before the settings tab is destroyed.
+        # A timed-out wait does not stop quitting, matching other cleanup.
+        for tab_id in self.tabs:
+            tab = self.tabs[tab_id]
+            if type(tab) is SettingsParentTab:
+                self._shutdown_settings_import(tab)
+
         # Clean up each tab
         for tab_id in self.tabs:
             if not (
@@ -485,6 +492,13 @@ class TabWidget(QtWidgets.QTabWidget):
             self.common.log("TabWidget", "closing a settings tab")
 
             if type(self.tabs[tab_id]) is SettingsParentTab:
+                if not self._shutdown_settings_import(tab):
+                    self.common.log(
+                        "TabWidget",
+                        "close_tab",
+                        "identity import still running, keeping the settings tab open",
+                    )
+                    return
                 self.tor_settings_tab = None
 
             # Remove the tab
@@ -516,6 +530,20 @@ class TabWidget(QtWidgets.QTabWidget):
                     self.new_tab_clicked()
             else:
                 self.common.log("TabWidget", "user does not want to close the tab")
+
+    def _shutdown_settings_import(self, settings_parent):
+        """
+        Wait out an identity-import decrypt before a settings tab is destroyed.
+
+        Returns False when the worker is still running after the timed wait.
+        """
+        shutdown = getattr(settings_parent, "shutdown_identity_import", None)
+        if shutdown is None:
+            return True
+        try:
+            return shutdown()
+        except RuntimeError:
+            return True
 
     def close_connection_tab(self):
         self.common.log("TabWidget", "close_connection_tab")

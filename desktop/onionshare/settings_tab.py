@@ -286,6 +286,30 @@ class SettingsTab(QtWidgets.QWidget):
         )
         self.saved_services_dialog.exec()
 
+    def shutdown_identity_import(self):
+        """
+        Wait out an import decrypt before this settings tab is destroyed.
+
+        Returns False when the worker is still running after the timed wait.
+        The caller should keep the tab open in that case.
+        """
+        dialog = getattr(self, "saved_services_dialog", None)
+        if dialog is None:
+            return True
+        shutdown = getattr(dialog, "shutdown_identity_import", None)
+        if shutdown is None:
+            return True
+        try:
+            return shutdown()
+        except RuntimeError:
+            return True
+
+    def event(self, event):
+        # deleteLater delivers DeferredDelete before the C++ object is destroyed.
+        if event.type() == QtCore.QEvent.Type.DeferredDelete:
+            self.shutdown_identity_import()
+        return super(SettingsTab, self).event(event)
+
     def save_clicked(self):
         """
         Save button clicked. Save current settings to disk.

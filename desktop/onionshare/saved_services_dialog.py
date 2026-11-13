@@ -25,8 +25,9 @@ client-auth keys inside a record are plaintext. This archive is not an
 encrypted backup. The disclosure in this dialog says so.
 
 Open calls ``TabWidget.open_saved_service`` and does not call
-``start_server``. Import from a file or pasted text is a separate
-caller of that same helper (Prompt 5); this dialog does not import.
+``start_server``. Import backup opens ImportIdentityDialog, which
+decrypts on a worker thread and then calls that same helper. Neither
+path starts a server.
 """
 
 from PySide6 import QtCore, QtWidgets
@@ -34,6 +35,7 @@ from PySide6 import QtCore, QtWidgets
 from onionshare_cli.saved_services import SavedServices, SavedServicesError
 
 from . import strings
+from .identity_import_dialog import ImportIdentityDialog
 from .widgets import Alert
 
 
@@ -86,6 +88,8 @@ class SavedServicesDialog(QtWidgets.QDialog):
         self.common.log("SavedServicesDialog", "__init__")
         self.tab_widget = tab_widget
         self._records = {}
+        self.import_dialog = None
+        self._close_in_progress = False
 
         self.setWindowTitle(strings._("gui_saved_services_dialog_title"))
         self.setModal(True)
@@ -130,6 +134,11 @@ class SavedServicesDialog(QtWidgets.QDialog):
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self.table.itemDoubleClicked.connect(lambda _item: self.open_selected())
 
+        self.import_button = QtWidgets.QPushButton(
+            strings._("gui_saved_services_import_button")
+        )
+        self.import_button.setObjectName("saved_services_import_button")
+        self.import_button.clicked.connect(self.import_clicked)
         self.open_button = QtWidgets.QPushButton(
             strings._("gui_saved_services_open_button")
         )
@@ -151,6 +160,7 @@ class SavedServicesDialog(QtWidgets.QDialog):
         self.close_button.clicked.connect(self.reject)
 
         buttons = QtWidgets.QHBoxLayout()
+        buttons.addWidget(self.import_button)
         buttons.addWidget(self.open_button)
         buttons.addWidget(self.rename_button)
         buttons.addWidget(self.delete_button)
@@ -165,6 +175,58 @@ class SavedServicesDialog(QtWidgets.QDialog):
         self.setLayout(layout)
 
         self.reload()
+
+    def import_clicked(self):
+        """Open the backup importer. It decrypts, archives, then opens stopped."""
+        self.common.log("SavedServicesDialog", "import_clicked")
+        previous = self.import_dialog
+        if previous is not None:
+            try:
+                if not previous.shutdown_decrypt_thread():
+                    return
+            except RuntimeError:
+                pass
+        self.import_dialog = ImportIdentityDialog(
+            self.common,
+            self.tab_widget,
+            on_imported=self.reload,
+            parent=self,
+        )
+        self.import_dialog.exec()
+        self.reload()
+
+    def shutdown_identity_import(self):
+        """
+        Wait out an in-progress import decrypt before this dialog is destroyed.
+
+        Returns False when the worker is still running after the timed wait.
+        """
+        dialog = self.import_dialog
+        if dialog is None:
+            return True
+        try:
+            return dialog.shutdown_decrypt_thread()
+        except RuntimeError:
+            return True
+
+    def reject(self):
+        if self._close_in_progress:
+            super(SavedServicesDialog, self).reject()
+            return
+        if not self.shutdown_identity_import():
+            return
+        self._close_in_progress = True
+        super(SavedServicesDialog, self).reject()
+
+    def closeEvent(self, event):
+        if self._close_in_progress:
+            super(SavedServicesDialog, self).closeEvent(event)
+            return
+        if not self.shutdown_identity_import():
+            event.ignore()
+            return
+        self._close_in_progress = True
+        super(SavedServicesDialog, self).closeEvent(event)
 
     def reload(self):
         """Replace the table with the current archive. Errors use a fixed string."""
