@@ -180,29 +180,35 @@ if platform.system() == "Darwin" and platform.processor() == "arm":
         "PySide6.QtWidgets",
     ]
 
-setup(
-    name="onionshare",
-    version=version,
-    description="Securely and anonymously share files, host websites, and chat with friends using the Tor network",
-    packages=find_packages(
-        where=".",
-        include=["onionshare"],
-        exclude=["package", "screenshots", "scripts", "tests"],
-    ),
-    options={
-        # build_exe, for Windows and macOS
-        "build_exe": build_exe_options,
-        # bdist_mac, making the macOS app bundle
-        "bdist_mac": {
-            "iconfile": os.path.join("onionshare", "resources", "onionshare.icns"),
-            "bundle_name": "OnionShare",
-            "plist_items": [
-                ("CFBundleShortVersionString", version),
-                ("CFBundleVersion", version),
-            ],
-        },
-    },
-    executables=[
+# Fork release branch only. The extra console target runs the identity-backup
+# self-test inside the frozen interpreter. The release workflow deletes that
+# binary before it builds the MSI or DMG. Set ONIONSHARE_FORK_SELFTEST_ONLY=1
+# to freeze just this target (used to prove nacl/_sodium on Linux).
+selftest_only = os.environ.get("ONIONSHARE_FORK_SELFTEST_ONLY") == "1"
+selftest_target = (
+    "onionshare-fork-selftest.exe"
+    if platform.system() == "Windows"
+    else "onionshare-fork-selftest"
+)
+selftest_executable = Executable(
+    "scripts/onionshare-fork-selftest.py",
+    base=None,
+    target_name=selftest_target,
+)
+if selftest_only:
+    build_exe_options["packages"] = ["cffi", "nacl", "onionshare_cli"]
+    build_exe_options.pop("zip_include_packages", None)
+    build_exe_options["excludes"] = [
+        "test",
+        "tkinter",
+        "PySide6",
+        "shiboken6",
+        "onionshare",
+    ]
+    frozen_executables = [selftest_executable]
+    setup_packages = []
+else:
+    frozen_executables = [
         Executable(
             "package/onionshare.py",
             base=gui_base,
@@ -213,5 +219,36 @@ setup(
             base=None,
             icon=exec_icon,
         ),
-    ],
+        selftest_executable,
+    ]
+    setup_packages = find_packages(
+        where=".",
+        include=["onionshare"],
+        exclude=["package", "screenshots", "scripts", "tests"],
+    )
+
+setup(
+    name="onionshare",
+    version=version,
+    description="Securely and anonymously share files, host websites, and chat with friends using the Tor network",
+    packages=setup_packages,
+    options={
+        # build_exe, for Windows and macOS
+        "build_exe": build_exe_options,
+        # bdist_mac, making the macOS app bundle
+        "bdist_mac": {
+            "iconfile": os.path.join("onionshare", "resources", "onionshare.icns"),
+            # Not OnionShare.app, so copying this bundle does not replace
+            # an official install that lives at that filename.
+            "bundle_name": "OnionShareFork",
+            "plist_items": [
+                ("CFBundleShortVersionString", version),
+                ("CFBundleVersion", version),
+                ("CFBundleName", "OnionShare Fork (identity backups)"),
+                ("CFBundleDisplayName", "OnionShare Fork (identity backups)"),
+                ("CFBundleIdentifier", "io.github.maxtannahill.OnionShareFork"),
+            ],
+        },
+    },
+    executables=frozen_executables,
 )

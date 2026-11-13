@@ -28,7 +28,8 @@ entitlements_plist_path = f"{desktop_dir}/package/Entitlements.plist"
 
 
 def get_app_path():
-    return os.path.join(desktop_dir, "build", "OnionShare.app")
+    # Fork release branch: the frozen bundle is OnionShareFork.app.
+    return os.path.join(desktop_dir, "build", "OnionShareFork.app")
 
 
 def run(cmd, cwd=None, error_ok=False):
@@ -268,7 +269,11 @@ def codesign(app_path):
 @main.command()
 @click.argument("app_path")
 def package(app_path):
-    """Build the DMG package"""
+    """Build a Developer ID-signed DMG.
+
+    The fork release workflow must not call this. It ad-hoc signs with
+    codesign --sign - and runs create-dmg without --identity.
+    """
     if not os.path.exists("/usr/local/bin/create-dmg") and not os.path.exists(
         "/opt/homebrew/bin/create-dmg"
     ):
@@ -296,11 +301,11 @@ def package(app_path):
             "--icon-size",
             "100",
             "--icon",
-            "OnionShare.app",
+            "OnionShareFork.app",
             "100",
             "70",
             "--hide-extension",
-            "OnionShare.app",
+            "OnionShareFork.app",
             "--app-drop-link",
             "300",
             "70",

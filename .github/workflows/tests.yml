@@ -1,12 +1,13 @@
-name: Run Tests
+# Neutralized on the fork release branch. The previous triggers were
+# push and pull_request to main. A branch push does not match the filter
+# below. A tag push, including v2.7.2-fork.*, does not match a branches-only
+# filter. pull_request is removed on this branch.
+name: Run Tests (disabled on fork release branch)
 run-name: Run tests
-on:
+"on":
   push:
     branches:
-      - main
-  pull_request:
-    branches:
-      - main
+      - "never-match-this-fork-release-branch"
 
 jobs:
   test-cli:

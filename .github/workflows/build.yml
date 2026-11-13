@@ -1,12 +1,13 @@
-name: Build
+# Neutralized on the fork release branch. The previous triggers were
+# push and pull_request to main. A branch push does not match the filter
+# below. A tag push, including v2.7.2-fork.*, does not match a branches-only
+# filter. pull_request is removed on this branch.
+name: Build (disabled on fork release branch)
 run-name: Build Windows (x86_64), macOS (Intel), Snap, and Flatpak 🚀
-on:
+"on":
   push:
     branches:
-      - main
-  pull_request:
-    branches:
-      - main
+      - "never-match-this-fork-release-branch"
 
 jobs:
   build-win64:

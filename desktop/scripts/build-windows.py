@@ -62,7 +62,8 @@ def sign(filename):
     )
 
 
-def wix_build_data(dirname, dir_prefix, id_, name):
+def wix_build_data(dirname, dir_prefix, id_, name, skip_basenames=None):
+    skip_basenames = set(skip_basenames or ())
     data = {
         "id": id_,
         "name": name,
@@ -73,6 +74,8 @@ def wix_build_data(dirname, dir_prefix, id_, name):
     for basename in os.listdir(dirname):
         filename = os.path.join(dirname, basename)
         if os.path.isfile(filename):
+            if basename in skip_basenames:
+                continue
             data["files"].append(os.path.join(dir_prefix, basename))
         elif os.path.isdir(filename):
             if id_ == "INSTALLDIR":
@@ -91,6 +94,7 @@ def wix_build_data(dirname, dir_prefix, id_, name):
                     os.path.join(dir_prefix, basename),
                     id_value,
                     basename,
+                    skip_basenames,
                 )
             )
 
@@ -104,7 +108,15 @@ def wix_build_data(dirname, dir_prefix, id_, name):
     return data
 
 
-def wix_build_dir_xml(root, data):
+def wix_build_dir_xml(
+    root,
+    data,
+    *,
+    shortcut_name="OnionShare",
+    shortcut_description="OnionShare",
+    registry_key="Software\\OnionShare",
+    shortcut_component_guid="539e7de8-a124-4c09-aa55-0dd516aad7bc",
+):
     attrs = {}
     if "id" in data:
         attrs["Id"] = data["id"]
@@ -112,7 +124,14 @@ def wix_build_dir_xml(root, data):
         attrs["Name"] = data["name"]
     el = ET.SubElement(root, "Directory", attrs)
     for subdata in data["dirs"]:
-        wix_build_dir_xml(el, subdata)
+        wix_build_dir_xml(
+            el,
+            subdata,
+            shortcut_name=shortcut_name,
+            shortcut_description=shortcut_description,
+            registry_key=registry_key,
+            shortcut_component_guid=shortcut_component_guid,
+        )
 
     # If this is the ProgramMenuFolder, add the menu component
     if "id" in data and data["id"] == "ProgramMenuFolder":
@@ -120,15 +139,15 @@ def wix_build_dir_xml(root, data):
             el,
             "Component",
             Id="ApplicationShortcuts",
-            Guid="539e7de8-a124-4c09-aa55-0dd516aad7bc",
+            Guid=shortcut_component_guid,
             Win64="yes",
         )
         ET.SubElement(
             component_el,
             "Shortcut",
             Id="ApplicationShortcut1",
-            Name="OnionShare",
-            Description="OnionShare",
+            Name=shortcut_name,
+            Description=shortcut_description,
             Target="[INSTALLDIR]onionshare.exe",
             WorkingDirectory="INSTALLDIR",
         )
@@ -136,7 +155,7 @@ def wix_build_dir_xml(root, data):
             component_el,
             "RegistryValue",
             Root="HKCU",
-            Key="Software\OnionShare",
+            Key=registry_key,
             Name="installed",
             Type="integer",
             Value="1",
@@ -169,8 +188,24 @@ def wix_build_components_xml(root, data):
     return component_ids
 
 
-def msi_package(build_path, msi_path, product_update_code, version):
-    print(f"> Build the WiX file")
+def msi_package(
+    build_path,
+    msi_path,
+    product_update_code,
+    version,
+    *,
+    product_name="OnionShare",
+    install_dir_name="OnionShare",
+    shortcut_name="OnionShare",
+    shortcut_description="OnionShare",
+    registry_key="Software\\OnionShare",
+    shortcut_component_guid="539e7de8-a124-4c09-aa55-0dd516aad7bc",
+    manufacturer="Micah Lee, et al.",
+    installer_description=None,
+    skip_basenames=None,
+    sign_package=True,
+):
+    print("> Build the WiX file")
 
     # change a version like 2.6.dev1 to just 2.6, for cx_Freeze's sake
     last_digit = version[-1]
@@ -197,16 +232,20 @@ def msi_package(build_path, msi_path, product_update_code, version):
             build_path,
             ".",
             "INSTALLDIR",
-            "OnionShare",
+            install_dir_name,
+            skip_basenames,
         )
     )
+
+    if installer_description is None:
+        installer_description = f"{product_name} $(var.ProductVersion) Installer"
 
     root_el = ET.Element("Wix", xmlns="http://schemas.microsoft.com/wix/2006/wi")
     product_el = ET.SubElement(
         root_el,
         "Product",
-        Name="OnionShare",
-        Manufacturer="Micah Lee, et al.",
+        Name=product_name,
+        Manufacturer=manufacturer,
         Id="*",
         UpgradeCode="$(var.ProductUpgradeCode)",
         Language="1033",
@@ -218,8 +257,8 @@ def msi_package(build_path, msi_path, product_update_code, version):
         "Package",
         Id="*",
         Keywords="Installer",
-        Description="OnionShare $(var.ProductVersion) Installer",
-        Manufacturer="Micah Lee, et al.",
+        Description=installer_description,
+        Manufacturer=manufacturer,
         InstallerVersion="200",
         Languages="1033",
         Compressed="yes",
@@ -269,7 +308,14 @@ def msi_package(build_path, msi_path, product_update_code, version):
         DowngradeErrorMessage="A newer version of [ProductName] is already installed. If you are sure you want to downgrade, remove the existing installation via Programs and Features.",
     )
 
-    wix_build_dir_xml(product_el, data)
+    wix_build_dir_xml(
+        product_el,
+        data,
+        shortcut_name=shortcut_name,
+        shortcut_description=shortcut_description,
+        registry_key=registry_key,
+        shortcut_component_guid=shortcut_component_guid,
+    )
     component_ids = wix_build_components_xml(product_el, data)
 
     feature_el = ET.SubElement(product_el, "Feature", Id="DefaultFeature", Level="1")
@@ -295,16 +341,19 @@ def msi_package(build_path, msi_path, product_update_code, version):
         build_path,
     )
 
-    print(f"> Prepare OnionShare.msi for signing")
-    run(
-        [
-            shutil.which("insignia.exe"),
-            "-im",
-            os.path.join(build_path, "OnionShare.msi"),
-        ],
-        error_ok=True,
-    )
-    sign(os.path.join(build_path, "OnionShare.msi"))
+    if sign_package:
+        print("> Prepare OnionShare.msi for signing")
+        run(
+            [
+                shutil.which("insignia.exe"),
+                "-im",
+                os.path.join(build_path, "OnionShare.msi"),
+            ],
+            error_ok=True,
+        )
+        sign(os.path.join(build_path, "OnionShare.msi"))
+    else:
+        print("> Skipping insignia and signtool for the unsigned fork MSI")
 
     print(f"> Final MSI: {msi_path}")
     os.makedirs(os.path.join(desktop_dir, "dist"), exist_ok=True)
@@ -450,6 +499,64 @@ def package(path):
         os.path.join(desktop_dir, "dist", f"OnionShare-win64-{version}.msi"),
         "ed7f9243-3528-4b4a-b85c-9943982e75eb",
         version
+    )
+
+
+# Not the upstream UpgradeCode. A fork MSI that reused it would offer to
+# upgrade or replace official OnionShare.
+FORK_UPGRADE_CODE = "b0aef5da-7c28-4a9f-a000-11b8392782a7"
+FORK_SHORTCUT_COMPONENT_GUID = "60720b89-b5aa-4899-b553-05102a169a6a"
+FORK_PRODUCT_NAME = "OnionShare Fork (identity backups)"
+UPSTREAM_UPGRADE_CODE = "ed7f9243-3528-4b4a-b85c-9943982e75eb"
+FORK_SELFTEST_BASENAMES = (
+    "onionshare-fork-selftest",
+    "onionshare-fork-selftest.exe",
+)
+
+
+@main.command(name="package-fork-unsigned")
+@click.argument("path")
+def package_fork_unsigned(path):
+    """Build an unsigned fork MSI. Skips insignia and signtool."""
+    pyproject_filename = os.path.join(root, "cli", "pyproject.toml")
+    with open(pyproject_filename, "rb") as f:
+        pyproject = tomllib.load(f)
+        version = pyproject["project"]["version"]
+    if version != "2.7.2":
+        raise SystemExit(
+            f"WiX ProductVersion must stay numeric 2.7.2, got {version}"
+        )
+    if FORK_UPGRADE_CODE.lower() == UPSTREAM_UPGRADE_CODE.lower():
+        raise SystemExit("fork UpgradeCode collides with upstream")
+
+    tag = os.environ.get("ONIONSHARE_FORK_TAG", "v2.7.2-fork.1")
+    if tag.startswith("refs/tags/"):
+        tag = tag[len("refs/tags/") :]
+    label = tag[1:] if tag.startswith("v") else tag
+    if not label.startswith("2.7.2-fork."):
+        raise SystemExit(f"unexpected fork tag label: {label}")
+
+    msi_path = os.path.join(
+        desktop_dir, "dist", f"OnionShare-fork-{label}-win64-UNSIGNED.msi"
+    )
+    print(f"> Fork product name: {FORK_PRODUCT_NAME}")
+    print(f"> Fork UpgradeCode: {FORK_UPGRADE_CODE}")
+    print("> WiX ProductVersion: 2.7.2")
+    print("> insignia: skipped")
+    print("> signtool: skipped")
+    msi_package(
+        path,
+        msi_path,
+        FORK_UPGRADE_CODE,
+        version,
+        product_name=FORK_PRODUCT_NAME,
+        install_dir_name="OnionShareFork",
+        shortcut_name=FORK_PRODUCT_NAME,
+        shortcut_description=FORK_PRODUCT_NAME,
+        registry_key="Software\\OnionShareFork",
+        shortcut_component_guid=FORK_SHORTCUT_COMPONENT_GUID,
+        skip_basenames=FORK_SELFTEST_BASENAMES,
+        sign_package=False,
     )
 
 

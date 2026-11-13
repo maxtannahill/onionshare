@@ -1,5 +1,5 @@
 [Desktop Entry]
-Name=OnionShare
+Name=OnionShare Fork (identity backups)
 Exec=onionshare
 Terminal=false
 Type=Application

@@ -1,7 +1,11 @@
-name: onionshare
+# Fork release branch. This name must not be "onionshare" so a local
+# install cannot replace the upstream snap. The workflow builds the snap
+# and does not upload it. Product code treats SNAP_INSTANCE_NAME
+# "onionshare" as the snap; this name will not match that check.
+name: onionshare-fork
 base: core24
 version: "2.7.2"
-summary: Securely and anonymously share files, host websites, and chat using Tor
+summary: Fork of OnionShare with identity backups (not the upstream snap)
 description: |
   OnionShare lets you securely and anonymously send and receive files. It works by starting
   a web server, making it accessible as a Tor onion service, and generating an unguessable
@@ -17,7 +21,7 @@ platforms:
 
 apps:
   onionshare:
-    common-id: org.onionshare.OnionShare
+    common-id: io.github.maxtannahill.OnionShareFork
     command: bin/onionshare
     extensions: [gnome]
     plugs:
@@ -32,7 +36,7 @@ apps:
       LD_LIBRARY_PATH: $LD_LIBRARY_PATH:$SNAP/usr/local/lib
 
   cli:
-    common-id: org.onionshare.OnionShareCli
+    common-id: io.github.maxtannahill.OnionShareForkCli
     command: bin/onionshare-cli
     plugs:
       - home

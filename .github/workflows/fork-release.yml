@@ -1,0 +1,797 @@
+# Fork release workflow. This file is the only workflow that runs for a
+# tag v2.7.2-fork.*. Pushing the release branch matches nothing here:
+# workflow_dispatch is not used, because GitHub only offers that for
+# workflow files on the default branch. There is no pull_request trigger
+# and no schedule.
+name: Fork release (unsigned draft)
+
+"on":
+  push:
+    tags:
+      - "v2.7.2-fork.*"
+
+permissions:
+  contents: read
+
+env:
+  ONIONSHARE_FORK_TAG: ${{ github.ref_name }}
+
+jobs:
+  test-cli:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get -y install tor obfs4proxy
+          pip install --upgrade pip
+          pip install poetry==2.1.2
+          poetry --version | grep -F "2.1.2"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: fork-${{ runner.os }}-cli-poetry-${{ hashFiles('cli/poetry.lock') }}
+      - run: cd cli && poetry install --no-interaction
+      - name: CLI test suite
+        run: |
+          set -euo pipefail
+          cd cli
+          poetry run pytest -v ./tests
+          poetry run onionshare-cli --local-only ./tests --auto-stop-timer 2 --qr --verbose
+          poetry run onionshare-cli --local-only ./tests --auto-start-timer 2 --auto-stop-timer 2 --qr --verbose
+          poetry run onionshare-cli --local-only --receive --auto-stop-timer 2 --qr --verbose
+          poetry run onionshare-cli --local-only --website ../docs --auto-stop-timer 2 --qr --verbose
+          poetry run onionshare-cli --local-only --chat --auto-stop-timer 5 --qr --verbose
+          touch /tmp/foo{1,2} && poetry run onionshare-cli --local-only --persistent tests/persistent.json --auto-stop-timer 5 --verbose
+
+  test-desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y tor obfs4proxy gcc python3-dev python3-pyside6.qtcore python3-pyside6.qtwidgets python3-pyside6.qtgui
+          sudo apt-get install -y xvfb x11-utils libxkbcommon-x11-0 libxcb-randr0-dev libxcb-xtest0-dev libxcb-xinerama0-dev libxcb-shape0-dev libxcb-xkb-dev libxcb-render-util0 libxcb-icccm4 libxcb-keysyms1 libxcb-image0
+          pip install --upgrade pip
+          pip install poetry==2.1.2
+          poetry --version | grep -F "2.1.2"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: fork-${{ runner.os }}-desktop-poetry-${{ hashFiles('desktop/poetry.lock') }}
+      - run: cd desktop && poetry install --no-interaction
+      - name: Desktop test suite
+        run: |
+          set -euo pipefail
+          cd desktop
+          QT_QPA_PLATFORM=offscreen QT_DEBUG_PLUGINS=1 xvfb-run -a poetry run pytest -vv -s -o faulthandler_timeout=60 ./tests/test_*.py
+
+  build-win64:
+    needs: [test-cli, test-desktop]
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.9"
+
+      - name: Install poetry 2.1.2
+        shell: pwsh
+        run: |
+          & C:\hostedtoolcache\windows\Python\3.12.9\x64\python -m pip install "poetry==2.1.2"
+          $version = & C:\hostedtoolcache\windows\Python\3.12.9\x64\Scripts\poetry --version
+          Write-Output $version
+          if ($version -notmatch "2\.1\.2") { exit 1 }
+
+      - name: Restore cache - poetry
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pypoetry\Cache\virtualenvs
+          key: fork-${{ runner.os }}-win64-poetry-${{ hashFiles('desktop/poetry.lock') }}
+
+      - name: Install poetry dependencies
+        run: |
+          cd desktop
+          C:\hostedtoolcache\windows\Python\3.12.9\x64\Scripts\poetry install --no-interaction
+          C:\hostedtoolcache\windows\Python\3.12.9\x64\Scripts\poetry env list --full-path
+
+      - name: Restore cache - tor
+        uses: actions/cache@v4
+        with:
+          path: desktop\build\tor
+          key: fork-${{ runner.os }}-win64-tor-${{ hashFiles('desktop/scripts/get-tor.py') }}
+
+      - name: Get tor binaries from Tor Browser (64-bit)
+        run: cd desktop && C:\hostedtoolcache\windows\Python\3.12.9\x64\Scripts\poetry run python .\scripts\get-tor.py windows-x86_64
+
+      - name: Install Go >=1.23.5
+        uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.23.5"
+          cache: false
+      - run: go version
+
+      - name: Restore cache - obfs4proxy
+        uses: actions/cache@v4
+        with:
+          path: desktop\onionshare\resources\tor\obfs4proxy.exe
+          key: fork-${{ runner.os }}-win64-obfs4proxy-${{ hashFiles('desktop/scripts/build-pt-obfs4proxy.ps1') }}
+
+      - name: Build obfs4proxy
+        shell: pwsh
+        run: |
+          if ((Test-Path -Path 'desktop\onionshare\resources\tor\obfs4proxy.exe') -eq $True) {
+            Write-Output "obfs4proxy already built"
+          } else {
+            cd desktop
+            .\scripts\build-pt-obfs4proxy.ps1
+          }
+
+      - name: Restore cache - snowflake
+        uses: actions/cache@v4
+        with:
+          path: desktop\onionshare\resources\tor\snowflake-client.exe
+          key: fork-${{ runner.os }}-win64-snowflake-${{ hashFiles('desktop/scripts/build-pt-snowflake.ps1') }}
+
+      - name: Build snowflake
+        shell: pwsh
+        run: |
+          if ((Test-Path -Path 'desktop\onionshare\resources\tor\snowflake-client.exe') -eq $True) {
+            Write-Output "snowflake already built"
+          } else {
+            cd desktop
+            .\scripts\build-pt-snowflake.ps1
+          }
+
+      - name: Restore cache - meek
+        uses: actions/cache@v4
+        with:
+          path: desktop\onionshare\resources\tor\meek-client.exe
+          key: fork-${{ runner.os }}-win64-meek-${{ hashFiles('desktop/scripts/build-pt-meek.ps1') }}
+
+      - name: Build meek
+        shell: pwsh
+        run: |
+          if ((Test-Path -Path 'desktop\onionshare\resources\tor\meek-client.exe') -eq $True) {
+            Write-Output "meek already built"
+          } else {
+            cd desktop
+            .\scripts\build-pt-meek.ps1
+          }
+
+      - name: Restore cache - webtunnel
+        uses: actions/cache@v4
+        with:
+          path: desktop\onionshare\resources\tor\webtunnel-client.exe
+          key: fork-${{ runner.os }}-win64-webtunnel-${{ hashFiles('desktop/scripts/build-pt-webtunnel.ps1') }}
+
+      - name: Build webtunnel
+        shell: pwsh
+        run: |
+          if ((Test-Path -Path 'desktop\onionshare\resources\tor\webtunnel-client.exe') -eq $True) {
+            Write-Output "webtunnel already built"
+          } else {
+            cd desktop
+            .\scripts\build-pt-webtunnel.ps1
+          }
+
+      - name: Build OnionShare
+        run: |
+          cd desktop
+          C:\hostedtoolcache\windows\Python\3.12.9\x64\Scripts\poetry run python .\setup-freeze.py build
+          C:\hostedtoolcache\windows\Python\3.12.9\x64\Scripts\poetry run python .\scripts\build-windows.py cleanup-build
+
+      - name: Smoke test frozen Windows build
+        shell: pwsh
+        run: |
+          $cli = ".\desktop\build\exe.win-amd64-3.12\onionshare-cli.exe"
+          $selftest = ".\desktop\build\exe.win-amd64-3.12\onionshare-fork-selftest.exe"
+          & $cli --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $selftest > selftest.txt
+          if ($LASTEXITCODE -ne 0) { Get-Content selftest.txt; exit $LASTEXITCODE }
+          if (-not (Select-String -Path selftest.txt -Pattern "SELFTEST PASSED" -Quiet)) { Get-Content selftest.txt; exit 1 }
+          @(
+            "runner: windows-latest"
+            "signing: unsigned; insignia skipped; signtool skipped"
+            "onionshare-cli --help: exit 0"
+          ) | Set-Content win64-smoke.txt
+          Get-Content selftest.txt | Add-Content win64-smoke.txt
+          & C:\hostedtoolcache\windows\Python\3.12.9\x64\python desktop\scripts\fork-gui-smoke.py --append --label win64-msi --summary win64-smoke.txt -- .\desktop\build\exe.win-amd64-3.12\onionshare.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build unsigned MSI
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\Program Files (x86)\WiX Toolset v3.14\bin;" + $env:PATH
+          Get-Command candle.exe
+          Get-Command light.exe
+          Remove-Item -Force -ErrorAction SilentlyContinue .\desktop\build\exe.win-amd64-3.12\onionshare-fork-selftest.exe
+          Get-ChildItem -Recurse .\desktop\build\exe.win-amd64-3.12 -Filter "onionshare-fork-selftest*" | Remove-Item -Force
+          cd desktop
+          & C:\hostedtoolcache\windows\Python\3.12.9\x64\Scripts\poetry run python .\scripts\build-windows.py package-fork-unsigned .\build\exe.win-amd64-3.12
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wxs = Get-Content -Raw .\build\exe.win-amd64-3.12\OnionShare.wxs
+          if ($wxs -notmatch [regex]::Escape("OnionShare Fork (identity backups)")) { throw "product name missing" }
+          if ($wxs -notmatch "b0aef5da-7c28-4a9f-a000-11b8392782a7") { throw "fork UpgradeCode missing" }
+          if ($wxs -match "ed7f9243-3528-4b4a-b85c-9943982e75eb") { throw "upstream UpgradeCode present" }
+          if ($wxs -notmatch 'ProductVersion = "2.7.2"') { throw "WiX version is not 2.7.2" }
+          if ($wxs -match "onionshare-fork-selftest") { throw "selftest is referenced by the wxs" }
+          $msi = @(Get-ChildItem .\dist\OnionShare-fork-*-win64-UNSIGNED.msi)
+          if ($msi.Count -ne 1) { throw "expected one unsigned MSI" }
+          $extract = Join-Path $env:RUNNER_TEMP "msi-layout\"
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          $proc = Start-Process msiexec.exe -ArgumentList @("/a", $msi[0].FullName, "/qn", "TARGETDIR=$extract") -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "msiexec /a failed: $($proc.ExitCode)" }
+          $shipped = @(Get-ChildItem -Recurse $extract -Filter "onionshare-fork-selftest*")
+          if ($shipped.Count -ne 0) { throw "selftest binary is inside the MSI" }
+          @(
+            "product-name: OnionShare Fork (identity backups)"
+            "upgrade-code: b0aef5da-7c28-4a9f-a000-11b8392782a7"
+            "wix-version: 2.7.2"
+            "install-dir: OnionShareFork"
+            "selftest-removed-before-msi: yes"
+          ) | Add-Content ..\win64-smoke.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-release-win64
+          path: desktop/dist/OnionShare-fork-*-win64-UNSIGNED.msi
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-smoke-win64
+          path: win64-smoke.txt
+          if-no-files-found: error
+
+  build-mac:
+    needs: [test-cli, test-desktop]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            label: intel
+            touch_mimer: true
+          - runner: macos-15
+            label: arm64
+            touch_mimer: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python 3.12.9 (universal2)
+        run: |
+          curl -L https://www.python.org/ftp/python/3.12.9/python-3.12.9-macos11.pkg --output ~/Downloads/python.pkg
+          cd ~/Downloads && echo "cca03f4d7ed77e93074d64936435d56d1f329870240cdb1ef0fd8e37cdaae8a0  python.pkg" | shasum -a 256 --check && sudo installer -pkg python.pkg -target /
+
+      - name: Install poetry 2.1.2
+        run: |
+          set -euo pipefail
+          curl -sSL https://install.python-poetry.org | POETRY_VERSION=2.1.2 python3 -
+          "$HOME/Library/Application Support/pypoetry/venv/bin/poetry" --version | grep -F "2.1.2"
+
+      - name: Restore cache - poetry
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/pypoetry/virtualenvs
+          key: fork-${{ runner.os }}-macos-${{ matrix.label }}-poetry-${{ hashFiles('desktop/poetry.lock') }}
+
+      - name: Install poetry dependencies
+        run: |
+          cd desktop
+          "$HOME/Library/Application Support/pypoetry/venv/bin/poetry" install --no-interaction
+
+      - name: Restore cache - tor
+        uses: actions/cache@v4
+        with:
+          path: desktop/build/tor
+          key: fork-${{ runner.os }}-macos-${{ matrix.label }}-tor-${{ hashFiles('desktop/scripts/get-tor.py') }}
+
+      - name: Get tor binaries from Tor Browser
+        run: |
+          cd desktop
+          "$HOME/Library/Application Support/pypoetry/venv/bin/poetry" run python ./scripts/get-tor.py macos
+
+      - name: Install Go >=1.23.5
+        uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.23.5"
+          cache: false
+      - run: go version
+
+      - name: Restore cache - obfs4proxy
+        uses: actions/cache@v4
+        with:
+          path: desktop/onionshare/resources/tor/obfs4proxy
+          key: fork-${{ runner.os }}-macos-${{ matrix.label }}-obfs4proxy-${{ hashFiles('desktop/scripts/build-pt-obfs4proxy.sh') }}
+
+      - name: Build obfs4proxy
+        run: |
+          if [[ -f "desktop/onionshare/resources/tor/obfs4proxy" ]]; then
+            echo "obfs4proxy already built"
+          else
+            cd desktop
+            ./scripts/build-pt-obfs4proxy.sh
+          fi
+
+      - name: Restore cache - snowflake
+        uses: actions/cache@v4
+        with:
+          path: desktop/onionshare/resources/tor/snowflake-client
+          key: fork-${{ runner.os }}-macos-${{ matrix.label }}-snowflake-${{ hashFiles('desktop/scripts/build-pt-snowflake.sh') }}
+
+      - name: Build snowflake
+        run: |
+          if [[ -f "desktop/onionshare/resources/tor/snowflake-client" ]]; then
+            echo "snowflake already built"
+          else
+            cd desktop
+            ./scripts/build-pt-snowflake.sh
+          fi
+
+      - name: Restore cache - meek
+        uses: actions/cache@v4
+        with:
+          path: desktop/onionshare/resources/tor/meek-client
+          key: fork-${{ runner.os }}-macos-${{ matrix.label }}-meek-${{ hashFiles('desktop/scripts/build-pt-meek.sh') }}
+
+      - name: Build meek
+        run: |
+          if [[ -f "desktop/onionshare/resources/tor/meek-client" ]]; then
+            echo "meek already built"
+          else
+            cd desktop
+            ./scripts/build-pt-meek.sh
+          fi
+
+      - name: Restore cache - webtunnel
+        uses: actions/cache@v4
+        with:
+          path: desktop/onionshare/resources/tor/webtunnel-client
+          key: fork-${{ runner.os }}-macos-${{ matrix.label }}-webtunnel-${{ hashFiles('desktop/scripts/build-pt-webtunnel.sh') }}
+
+      - name: Build webtunnel
+        run: |
+          if [[ -f "desktop/onionshare/resources/tor/webtunnel-client" ]]; then
+            echo "webtunnel already built"
+          else
+            cd desktop
+            ./scripts/build-pt-webtunnel.sh
+          fi
+
+      - name: Install cx_Freeze/PySide6 build dependencies
+        run: |
+          brew install libiodbc
+          curl -L https://github.com/PostgresApp/PostgresApp/releases/download/v2.6.5/Postgres-2.6.5-14.dmg --output ~/Downloads/Postgres-2.6.5-14.dmg
+          cd ~/Downloads && echo "26a2a8a877008cba735d7d8b734dd6e445b2962ce372de6f6b5add3113705920  Postgres-2.6.5-14.dmg" | shasum -a 256 --check
+          hdiutil attach Postgres-2.6.5-14.dmg
+          cp -r /Volumes/Postgres-2.6.5-14/Postgres.app /Applications/
+          hdiutil detach /Volumes/Postgres-2.6.5-14
+
+      - name: Touch dylib file for build to finish
+        if: matrix.touch_mimer
+        run: touch /usr/local/lib/libmimerapi.dylib
+
+      - name: Build OnionShare
+        run: |
+          cd desktop
+          "$HOME/Library/Application Support/pypoetry/venv/bin/poetry" run python ./setup-freeze.py bdist_mac
+          "$HOME/Library/Application Support/pypoetry/venv/bin/poetry" run python ./scripts/build-macos.py cleanup-build
+
+      - name: Smoke test frozen macOS build
+        run: |
+          set -euo pipefail
+          APP="desktop/build/OnionShareFork.app"
+          "$APP/Contents/MacOS/onionshare-cli" --help
+          "$APP/Contents/MacOS/onionshare-fork-selftest" | tee "macos-${{ matrix.label }}-selftest.txt"
+          grep -q "SELFTEST PASSED" "macos-${{ matrix.label }}-selftest.txt"
+          {
+            echo "runner: ${{ matrix.runner }}"
+            echo "signing: unsigned single-arch app; not notarized"
+            echo "onionshare-cli --help: exit 0"
+            cat "macos-${{ matrix.label }}-selftest.txt"
+          } > "macos-${{ matrix.label }}-smoke.txt"
+          python3 desktop/scripts/fork-gui-smoke.py --append --label "macos-${{ matrix.label }}" --summary "macos-${{ matrix.label }}-smoke.txt" -- "$APP/Contents/MacOS/onionshare"
+
+      - name: Compress
+        run: |
+          cd desktop/build
+          tar -czvf "$HOME/onionshare-macos-${{ matrix.label }}.tar.gz" OnionShareFork.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-macos-${{ matrix.label }}-app
+          path: ~/onionshare-macos-${{ matrix.label }}.tar.gz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-smoke-mac-${{ matrix.label }}
+          path: macos-${{ matrix.label }}-smoke.txt
+          if-no-files-found: error
+
+  merge-mac-universal:
+    needs: build-mac
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: fork-macos-intel-app
+          path: ~/downloads
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: fork-macos-arm64-app
+          path: ~/downloads
+
+      - name: Merge universal bundle and smoke the arm64 slice
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user 'click==8.5.1'
+          mkdir -p "$HOME/tmp/intel" "$HOME/tmp/arm64" "$HOME/tmp/universal"
+          tar -xzf "$HOME/downloads/onionshare-macos-intel.tar.gz" -C "$HOME/tmp/intel"
+          tar -xzf "$HOME/downloads/onionshare-macos-arm64.tar.gz" -C "$HOME/tmp/arm64"
+          cd desktop
+          python3 ./scripts/macos-merge-universal.py \
+            "$HOME/tmp/intel/OnionShareFork.app" \
+            "$HOME/tmp/arm64/OnionShareFork.app" \
+            "$HOME/tmp/universal/OnionShareFork.app"
+          APP="$HOME/tmp/universal/OnionShareFork.app"
+          "$APP/Contents/MacOS/onionshare-cli" --help
+          "$APP/Contents/MacOS/onionshare-fork-selftest" | tee "$HOME/universal-selftest.txt"
+          grep -q "SELFTEST PASSED" "$HOME/universal-selftest.txt"
+          {
+            echo "runner: macos-15"
+            echo "slice: arm64 half of the universal bundle, before selftest removal"
+            echo "signing: not yet ad-hoc signed"
+            echo "onionshare-cli --help: exit 0"
+            cat "$HOME/universal-selftest.txt"
+          } > "$GITHUB_WORKSPACE/macos-universal-arm-smoke.txt"
+          python3 "$GITHUB_WORKSPACE/desktop/scripts/fork-gui-smoke.py" \
+            --append --label macos-universal-arm \
+            --summary "$GITHUB_WORKSPACE/macos-universal-arm-smoke.txt" \
+            -- "$APP/Contents/MacOS/onionshare"
+          tar -czvf "$HOME/onionshare-macos-universal.tar.gz" -C "$HOME/tmp/universal" OnionShareFork.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-macos-universal-app
+          path: ~/onionshare-macos-universal.tar.gz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-smoke-mac-universal-arm
+          path: macos-universal-arm-smoke.txt
+          if-no-files-found: error
+
+  smoke-mac-universal-intel:
+    needs: merge-mac-universal
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: fork-macos-universal-app
+          path: ~/downloads
+      - name: Smoke the intel slice of the universal bundle
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/tmp/universal"
+          tar -xzf "$HOME/downloads/onionshare-macos-universal.tar.gz" -C "$HOME/tmp/universal"
+          APP="$HOME/tmp/universal/OnionShareFork.app"
+          "$APP/Contents/MacOS/onionshare-cli" --help
+          "$APP/Contents/MacOS/onionshare-fork-selftest" | tee "$HOME/universal-intel-selftest.txt"
+          grep -q "SELFTEST PASSED" "$HOME/universal-intel-selftest.txt"
+          {
+            echo "runner: macos-15-intel"
+            echo "slice: intel half of the universal bundle, before selftest removal"
+            echo "signing: not yet ad-hoc signed"
+            echo "onionshare-cli --help: exit 0"
+            cat "$HOME/universal-intel-selftest.txt"
+          } > macos-universal-intel-smoke.txt
+          python3 desktop/scripts/fork-gui-smoke.py \
+            --append --label macos-universal-intel \
+            --summary macos-universal-intel-smoke.txt \
+            -- "$APP/Contents/MacOS/onionshare"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-smoke-mac-universal-intel
+          path: macos-universal-intel-smoke.txt
+          if-no-files-found: error
+
+  package-mac-dmg:
+    needs: [merge-mac-universal, smoke-mac-universal-intel]
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: fork-macos-universal-app
+          path: ~/downloads
+      - name: Ad-hoc sign and build an unsigned DMG
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          case "$TAG" in
+            2.7.2-fork.*) ;;
+            *) echo "unexpected tag $GITHUB_REF_NAME"; exit 1 ;;
+          esac
+          mkdir -p "$HOME/tmp/universal"
+          tar -xzf "$HOME/downloads/onionshare-macos-universal.tar.gz" -C "$HOME/tmp/universal"
+          APP="$HOME/tmp/universal/OnionShareFork.app"
+          find "$APP" -name 'onionshare-fork-selftest*' -print -delete
+          test ! -e "$APP/Contents/MacOS/onionshare-fork-selftest"
+          codesign --sign - --force --deep "$APP"
+          {
+            echo "runner: macos-15"
+            echo "signing: ad-hoc codesign --sign -; create-dmg without --identity; not notarized"
+            echo "selftest-removed-before-dmg: yes"
+            echo "bundle: OnionShareFork.app"
+          } > macos-dmg-smoke.txt
+          python3 desktop/scripts/fork-gui-smoke.py \
+            --append --label macos-universal2-dmg \
+            --summary macos-dmg-smoke.txt \
+            -- "$APP/Contents/MacOS/onionshare"
+          brew install create-dmg
+          OUT="$HOME/OnionShare-fork-${TAG}-macos-universal2-UNSIGNED.dmg"
+          create-dmg \
+            --volname "OnionShare Fork" \
+            --volicon "$GITHUB_WORKSPACE/desktop/onionshare/resources/onionshare.icns" \
+            --window-size 400 200 \
+            --icon-size 100 \
+            --icon "OnionShareFork.app" 100 70 \
+            --hide-extension "OnionShareFork.app" \
+            --app-drop-link 300 70 \
+            "$OUT" \
+            "$APP"
+          test -f "$OUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-release-dmg
+          path: ~/OnionShare-fork-*-macos-universal2-UNSIGNED.dmg
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-smoke-dmg
+          path: macos-dmg-smoke.txt
+          if-no-files-found: error
+
+  build-flatpak:
+    needs: [test-cli, test-desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup
+        run: |
+          set -euo pipefail
+          sudo apt update
+          sudo apt install -y flatpak flatpak-builder xvfb
+          flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Restore cache - .flatpak-builder
+        uses: actions/cache@v4
+        with:
+          path: flatpak/.flatpak-builder
+          key: fork-flatpak-.flatpak-builder-${{ hashFiles('flatpak/org.onionshare.OnionShare.yaml') }}
+
+      - name: Restore cache - build
+        uses: actions/cache@v4
+        with:
+          path: flatpak/build
+          key: fork-flatpak-build-${{ hashFiles('flatpak/org.onionshare.OnionShare.yaml') }}
+
+      - name: Flatpak build
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          case "$TAG" in
+            2.7.2-fork.*) ;;
+            *) echo "unexpected tag $GITHUB_REF_NAME"; exit 1 ;;
+          esac
+          cd flatpak
+          flatpak-builder build --force-clean --verbose --install-deps-from=flathub --install --user org.onionshare.OnionShare.yaml
+          flatpak build-bundle ~/.local/share/flatpak/repo "$HOME/OnionShare-fork-${TAG}-x86_64.flatpak" io.github.maxtannahill.OnionShareFork --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
+          test -f "$HOME/OnionShare-fork-${TAG}-x86_64.flatpak"
+
+      - name: Flatpak launch smoke
+        run: |
+          set -euo pipefail
+          {
+            echo "runner: ubuntu-latest"
+            echo "app-id: io.github.maxtannahill.OnionShareFork"
+            echo "signing: unsigned flatpak bundle; not published to Flathub"
+            echo "product-code: is_flatpak() in onionshare_cli.common still requires FLATPAK_ID org.onionshare.OnionShare"
+          } > flatpak-smoke.txt
+          xvfb-run -a python3 desktop/scripts/fork-gui-smoke.py \
+            --append --label flatpak-x86_64 \
+            --summary flatpak-smoke.txt \
+            -- flatpak run --user --env=QT_QPA_PLATFORM=offscreen io.github.maxtannahill.OnionShareFork
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-release-flatpak
+          path: ~/OnionShare-fork-*-x86_64.flatpak
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-smoke-flatpak
+          path: flatpak-smoke.txt
+          if-no-files-found: error
+
+  build-snap:
+    needs: [test-cli, test-desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore cache - lxd
+        uses: actions/cache@v4
+        with:
+          path: ~/lxd_cache.tar.gz
+          key: fork-snap-lxd-${{ hashFiles('snap/snapcraft.yaml') }}
+
+      - name: Decompress cached content to lxd directory
+        run: |
+          if [ -f "$HOME/lxd_cache.tar.gz" ]; then
+            sudo tar -xzf "$HOME/lxd_cache.tar.gz" -C /
+          fi
+
+      - name: Install dependencies
+        run: |
+          sudo lxd init --auto
+          sudo lxc storage list
+          sudo snap install snapcraft --classic
+          sudo ufw disable
+
+      - name: Build snap
+        run: |
+          set -euo pipefail
+          # Build only. Do not log in and do not upload.
+          sudo snapcraft -v
+          found=0
+          for snap_file in onionshare*.snap; do
+            case "$snap_file" in
+              onionshare-fork_*_amd64.snap) found=$((found + 1)) ;;
+              *) echo "unexpected snap $snap_file"; exit 1 ;;
+            esac
+          done
+          test "$found" -eq 1
+
+      - name: Rename snap and attempt a local launch
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          case "$TAG" in
+            2.7.2-fork.*) ;;
+            *) echo "unexpected tag $GITHUB_REF_NAME"; exit 1 ;;
+          esac
+          snap_file=$(ls onionshare-fork_*_amd64.snap)
+          test "$(printf '%s\n' "$snap_file" | wc -l)" -eq 1
+          cp "$snap_file" "$HOME/OnionShare-fork-${TAG}_amd64.snap"
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          {
+            echo "runner: ubuntu-latest"
+            echo "snap-name: onionshare-fork"
+            echo "store-upload: not performed"
+            echo "signing: unsigned local snap; not published"
+            echo "product-code: is_snapcraft() in onionshare_cli.common still requires SNAP_INSTANCE_NAME onionshare"
+          } > snap-smoke.txt
+          if sudo snap install --dangerous "$snap_file"; then
+            xvfb-run -a python3 desktop/scripts/fork-gui-smoke.py \
+              --append --label snap-amd64 \
+              --summary snap-smoke.txt \
+              -- snap run onionshare-fork.onionshare
+          else
+            echo "snap-install: NOT PERFORMED (snap install --dangerous failed)" >> snap-smoke.txt
+            python3 desktop/scripts/fork-gui-smoke.py \
+              --append --label snap-amd64 \
+              --summary snap-smoke.txt
+          fi
+
+      - name: Compress lxd directory and set proper permissions
+        run: |
+          sudo tar -czf "$HOME/lxd_cache.tar.gz" /var/snap/lxd/common/lxd/storage-pools/default
+          sudo chown "$USER:$USER" "$HOME/lxd_cache.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-release-snap
+          path: ~/OnionShare-fork-*_amd64.snap
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-smoke-snap
+          path: snap-smoke.txt
+          if-no-files-found: error
+
+  draft-release:
+    needs:
+      - test-cli
+      - test-desktop
+      - build-win64
+      - build-mac
+      - merge-mac-universal
+      - smoke-mac-universal-intel
+      - package-mac-dmg
+      - build-flatpak
+      - build-snap
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fork-release-*
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fork-smoke-*
+          path: smoke
+      - name: Checksums, source archive, and draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          case "$TAG" in
+            2.7.2-fork.*) ;;
+            *) echo "unexpected tag $GITHUB_REF_NAME"; exit 1 ;;
+          esac
+          find release -type f \( -name '*.msi' -o -name '*.dmg' -o -name '*.flatpak' -o -name '*.snap' \) -exec cp {} . \;
+          git archive --format=tar.gz --prefix=onionshare/ -o "OnionShare-fork-${TAG}.tar.gz" HEAD
+          count=$(find . -maxdepth 1 -name 'OnionShare-fork-*' | wc -l)
+          test "$count" -eq 5
+          for file in OnionShare-fork-*; do
+            case "$file" in
+              *.msi|*.dmg|*.flatpak|*.snap|*.tar.gz) ;;
+              *) echo "unexpected artifact $file"; exit 1 ;;
+            esac
+          done
+          if compgen -G "*.asc" > /dev/null; then
+            echo "refusing upstream signature files"
+            exit 1
+          fi
+          sha256sum OnionShare-fork-* | sort -k 2 > SHA256SUMS
+          python3 desktop/scripts/fork-release-notes.py \
+            --sha "$GITHUB_SHA" \
+            --tag "$GITHUB_REF_NAME" \
+            --smoke-dir smoke \
+            --output release-notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --title "OnionShare fork ${GITHUB_REF_NAME} unsigned draft" \
+            --notes-file release-notes.md \
+            OnionShare-fork-* \
+            SHA256SUMS

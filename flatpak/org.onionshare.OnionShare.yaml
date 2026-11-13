@@ -1,5 +1,8 @@
 ---
-app-id: org.onionshare.OnionShare
+# Fork bundle id. cli/onionshare_cli/common.py is_flatpak() still compares
+# FLATPAK_ID to org.onionshare.OnionShare. This manifest does not change
+# that product module. gui_common.py detects Flatpak via /.flatpak-info.
+app-id: io.github.maxtannahill.OnionShareFork
 command: onionshare
 runtime: org.kde.Platform
 runtime-version: "6.11"
@@ -115,9 +118,11 @@ modules:
     build-commands:
       - rm desktop/pyproject.toml
       - export PIP_NO_INDEX=1 PIP_FIND_LINKS="file://${PWD}" && cd desktop && pip3 install --prefix=${FLATPAK_DEST} --no-deps --use-pep517 --no-index --find-links="${PIP_FIND_LINKS}" .
-      - cd desktop && install -D -m0644 org.onionshare.OnionShare.appdata.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.appdata.xml
-      - cd desktop && install -D -m0644 org.onionshare.OnionShare.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/org.onionshare.OnionShare.svg
-      - cd desktop && install -D -m0644 org.onionshare.OnionShare.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      - cd desktop && install -D -m0644 org.onionshare.OnionShare.appdata.xml ${FLATPAK_DEST}/share/metainfo/io.github.maxtannahill.OnionShareFork.appdata.xml
+      - cd desktop && install -D -m0644 org.onionshare.OnionShare.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.maxtannahill.OnionShareFork.svg
+      - cd desktop && install -D -m0644 org.onionshare.OnionShare.desktop ${FLATPAK_DEST}/share/applications/io.github.maxtannahill.OnionShareFork.desktop
+      - sed -i 's/org.onionshare.OnionShare/io.github.maxtannahill.OnionShareFork/g' ${FLATPAK_DEST}/share/metainfo/io.github.maxtannahill.OnionShareFork.appdata.xml ${FLATPAK_DEST}/share/applications/io.github.maxtannahill.OnionShareFork.desktop
+      - sed -i 's/^Name=.*/Name=OnionShare Fork (identity backups)/' ${FLATPAK_DEST}/share/applications/io.github.maxtannahill.OnionShareFork.desktop
     sources:
       - type: dir
         path: ..

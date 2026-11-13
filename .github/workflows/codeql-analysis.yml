@@ -9,17 +9,18 @@
 # the `language` matrix defined below to confirm you have the correct set of
 # supported CodeQL languages.
 #
-name: "CodeQL"
+# Neutralized on the fork release branch. The previous triggers were
+# push and pull_request to main, plus a Friday schedule. A branch push
+# does not match the filter below. A tag push, including v2.7.2-fork.*,
+# does not match a branches-only filter. pull_request and schedule are
+# removed on this branch. Schedule on the default branch is unchanged
+# because that file is not this copy.
+name: "CodeQL (disabled on fork release branch)"
 
-on:
+"on":
   push:
     branches:
-      - main
-  pull_request:
-    branches:
-      - main
-  schedule:
-      - cron: '22 11 * * 5'
+      - "never-match-this-fork-release-branch"
 
 jobs:
   analyze:
