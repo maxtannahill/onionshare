@@ -6,6 +6,7 @@ Assertions that compare secrets use assertTrue/assertFalse so a failure does
 not print passphrases, private keys, or decrypted identities.
 """
 
+import errno
 import gc
 import inspect
 import json
@@ -23,6 +24,7 @@ from shiboken6 import isValid
 from onionshare_cli.identity_backup import IdentityBackupError, decrypt_identity
 from onionshare_cli import saved_services as saved_services_module
 from onionshare_cli.saved_services import SavedServices
+from onionshare_cli.settings import Settings
 
 from onionshare import identity_backup_dialog, identity_import_dialog, strings
 from onionshare.identity_import_dialog import ImportIdentityDialog
@@ -1344,3 +1346,308 @@ class TestIdentityBackupGui(GuiBaseTest):
                 dialog.close()
             except RuntimeError:
                 pass
+
+    def test_export_dialog_presentation(self):
+        """Titles, sections, actions, collapsed Advanced, and crisp QR."""
+        envelope = (
+            '{"ct":"YQ==","kdf":"argon2id","m":67108864,"n":"YQ==",'
+            '"p":1,"salt":"YQ==","t":2,"v":1}'
+        )
+        modes = []
+        real_scaled = QtGui.QPixmap.scaled
+
+        def spy_scaled(pixmap, *args, **kwargs):
+            if len(args) >= 4:
+                modes.append(args[3])
+            return real_scaled(pixmap, *args, **kwargs)
+
+        def fast(identity, passphrase):
+            return envelope
+
+        with mock.patch.object(QtGui.QPixmap, "scaled", spy_scaled):
+            with mock.patch.object(identity_backup_dialog, "encrypt_identity", fast):
+                dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                    self.gui.common,
+                    _fixture_identity(),
+                    "alpha-bravo-charlie-delta-echo-foxtrot",
+                )
+                self._dialog = dialog
+                self._wait_until(
+                    lambda: (not dialog.is_busy) and dialog.pending_bytes is not None
+                )
+        dialog.show()
+        self.gui.qtapp.processEvents()
+        self.assertEqual(
+            dialog.windowTitle(), strings._("gui_identity_backup_dialog_title")
+        )
+        self.assertEqual(dialog.windowTitle(), "Back up onion service")
+        self.assertTrue("files" in dialog.instructions.text().lower())
+        self.assertTrue("nothing is uploaded" in dialog.local_encryption_label.text().lower())
+        self.assertEqual(dialog.recovery_group.title(), "Recovery phrase")
+        self.assertEqual(dialog.encrypted_group.title(), "Encrypted backup")
+        self.assertTrue(
+            "cannot be recovered later" in dialog.passphrase_warning.text().lower()
+        )
+        self.assertFalse(dialog.advanced_widget.isVisible())
+        self.assertEqual(dialog.advanced_toggle.text(), "Advanced")
+        self.assertTrue(dialog.save_button.isEnabled())
+        self.assertTrue(dialog.save_button.isDefault())
+        self.assertTrue(dialog.save_qr_button.isEnabled())
+        self.assertTrue(dialog.copy_encrypted_button.isEnabled())
+        self.assertTrue(dialog.copy_passphrase_button.isEnabled())
+        self.assertTrue(dialog.regenerate_button.isEnabled())
+        self.assertFalse(dialog.regenerate_button.isDefault())
+        self.assertFalse(dialog.save_qr_button.isDefault())
+        self.assertFalse(dialog.copy_encrypted_button.isDefault())
+        self.assertFalse(dialog.qr_label.hasScaledContents())
+        self.assertTrue(
+            QtCore.Qt.TransformationMode.FastTransformation in modes
+        )
+        self.assertFalse(
+            QtCore.Qt.TransformationMode.SmoothTransformation in modes
+        )
+        image = dialog.qr_label.pixmap().toImage()
+        corner = image.pixelColor(0, 0)
+        self.assertEqual(corner.red(), 255)
+        self.assertEqual(corner.green(), 255)
+        self.assertEqual(corner.blue(), 255)
+        black = False
+        step_x = max(1, image.width() // 16)
+        step_y = max(1, image.height() // 16)
+        for y in range(0, image.height(), step_y):
+            for x in range(0, image.width(), step_x):
+                color = image.pixelColor(x, y)
+                if color.red() < 16 and color.green() < 16 and color.blue() < 16:
+                    black = True
+                    break
+            if black:
+                break
+        self.assertTrue(black)
+        self.assertTrue(dialog.qr_text.encode("utf-8") == dialog.pending_bytes)
+        dialog.advanced_toggle.click()
+        self.gui.qtapp.processEvents()
+        self.assertTrue(dialog.advanced_widget.isVisible())
+        shown = dialog.advanced_text.toPlainText()
+        self.assertTrue(dialog.qr_text in shown)
+        self.assertTrue("argon2id" in shown)
+        clipboard = QtWidgets.QApplication.clipboard()
+        dialog.copy_passphrase_button.click()
+        self.assertTrue(clipboard.text() == dialog.passphrase)
+        dialog.copy_encrypted_button.click()
+        self.assertTrue(clipboard.text() == dialog.qr_text)
+        clipboard.clear()
+
+    def test_quit_cleanup_does_not_block_on_export_worker(self):
+        tab = self._prepare_share_with_identity()
+        widget = tab.get_mode().mode_settings_widget
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked(identity, passphrase):
+            started.set()
+            release.wait(timeout=30)
+            return "{}"
+
+        try:
+            with mock.patch.object(
+                identity_backup_dialog, "encrypt_identity", blocked
+            ):
+                with mock.patch.object(
+                    QtWidgets.QDialog,
+                    "exec",
+                    return_value=QtWidgets.QDialog.DialogCode.Accepted,
+                ):
+                    widget.export_identity_backup_button.click()
+                dialog = widget.identity_backup_dialog
+                self._dialog = dialog
+                self._wait_until(started.is_set)
+                self.assertTrue(dialog.encrypt_thread.isRunning())
+                started_at = time.monotonic()
+                tab.cleanup()
+                elapsed = time.monotonic() - started_at
+                if elapsed >= 2.0:
+                    raise AssertionError("quit cleanup waited on the export worker")
+                if dialog._accepting_results:
+                    raise AssertionError("quit re-armed the export worker")
+                keeper = identity_backup_dialog._abandoned_thread_keeper
+                running = []
+                if keeper is not None:
+                    running = [
+                        thread
+                        for thread in list(keeper._threads)
+                        if thread.isRunning()
+                    ]
+                if not running:
+                    raise AssertionError("running worker was not retained")
+                release.set()
+                self._wait_until(lambda: not any(thread.isRunning() for thread in running))
+        finally:
+            release.set()
+
+    def test_quit_does_not_block_on_import_worker(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked(text, passphrase):
+            started.set()
+            release.wait(timeout=30)
+            return {"discarded": True}
+
+        dialog = ImportIdentityDialog(self.gui.common, self.gui.tabs)
+        try:
+            with mock.patch.object(
+                identity_import_dialog, "decrypt_identity", blocked
+            ):
+                dialog._start_decrypt("{}", "not-a-real-passphrase")
+                self._wait_until(started.is_set)
+                started_at = time.monotonic()
+                finished = dialog.shutdown_decrypt_thread(abandon=True)
+                elapsed = time.monotonic() - started_at
+                if elapsed >= 2.0:
+                    raise AssertionError("quit waited on the import worker")
+                if finished:
+                    raise AssertionError("abandon reported the worker finished")
+                if dialog._accepting_results:
+                    raise AssertionError("quit re-armed the import worker")
+                keeper = identity_import_dialog._abandoned_thread_keeper
+                if keeper is None or not any(
+                    thread.isRunning() for thread in list(keeper._threads)
+                ):
+                    raise AssertionError("running import worker was not retained")
+        finally:
+            release.set()
+            try:
+                if dialog.decrypt_thread is not None and dialog.decrypt_thread.isRunning():
+                    dialog.decrypt_thread.wait(5000)
+                dialog.close()
+            except RuntimeError:
+                pass
+
+    def _click_save_archive(self, widget, label):
+        messages = []
+
+        def exec_box(box, *args, **kwargs):
+            messages.append(box.text())
+            return QtWidgets.QMessageBox.StandardButton.Ok
+
+        with mock.patch.object(QtWidgets.QMessageBox, "exec", exec_box):
+            with mock.patch.object(
+                QtWidgets.QInputDialog, "getText", return_value=(label, True)
+            ):
+                widget.save_to_saved_services_button.click()
+        return messages
+
+    def test_post_commit_chmod_reports_saved_not_failure(self):
+        identity = _fixture_identity()
+        tab = self.new_share_tab()
+        _inject_identity(tab.settings, identity)
+        widget = tab.get_mode().mode_settings_widget
+        widget.update_ui()
+        record_path = os.path.join(
+            self.gui.common.build_data_dir(),
+            "saved_services",
+            identity["service_id"] + ".json",
+        )
+        archive = SavedServices(self.gui.common, self.gui.common.settings)
+        if os.path.isfile(record_path) or identity["service_id"] in list(
+            self.gui.common.settings.get("saved_services")
+        ):
+            archive.delete(identity["service_id"])
+        real_chmod = os.chmod
+
+        def fail_json_chmod(path, mode):
+            if str(path).endswith(".json"):
+                raise OSError(errno.EPERM, "chmod-failed")
+            return real_chmod(path, mode)
+
+        def fail_fsync(_directory):
+            raise OSError(errno.EIO, "fsync-failed")
+
+        log_messages, original_log = self._capture_common_log()
+        try:
+            with mock.patch.object(saved_services_module.os, "chmod", fail_json_chmod):
+                with mock.patch.object(
+                    saved_services_module, "_fsync_directory", fail_fsync
+                ):
+                    messages = self._click_save_archive(widget, "kept-label")
+        finally:
+            self._restore_common_log(original_log)
+
+        saved = strings._("gui_identity_backup_archive_saved")
+        warning = strings._("gui_identity_backup_archive_saved_warning")
+        error = strings._("gui_identity_backup_archive_error")
+        self.assertTrue(saved in messages)
+        self.assertTrue(warning in messages)
+        self.assertFalse(error in messages)
+        self.assertTrue(os.path.isfile(record_path))
+        archive_dir = os.path.dirname(record_path)
+        self.assertFalse(
+            any(name.startswith(".tmp-") for name in os.listdir(archive_dir))
+        )
+        self.gui.common.settings.load()
+        self.assertTrue(
+            identity["service_id"] in self.gui.common.settings.get("saved_services")
+        )
+        blobs = self._log_blobs(log_messages)
+        blobs.append("\n".join(messages))
+        for blob in blobs:
+            self.assertFalse("chmod-failed" in str(blob))
+            self.assertFalse("fsync-failed" in str(blob))
+        try:
+            SavedServices(self.gui.common, self.gui.common.settings).delete(
+                identity["service_id"]
+            )
+        except Exception:
+            pass
+
+    def test_settings_save_failure_after_commit_reports_saved(self):
+        identity = _fixture_identity()
+        tab = self.new_share_tab()
+        _inject_identity(tab.settings, identity)
+        widget = tab.get_mode().mode_settings_widget
+        widget.update_ui()
+        record_path = os.path.join(
+            self.gui.common.build_data_dir(),
+            "saved_services",
+            identity["service_id"] + ".json",
+        )
+        archive = SavedServices(self.gui.common, self.gui.common.settings)
+        if os.path.isfile(record_path) or identity["service_id"] in list(
+            self.gui.common.settings.get("saved_services")
+        ):
+            archive.delete(identity["service_id"])
+        calls = {"n": 0}
+        real_save = Settings.save
+
+        def flaky(settings):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(errno.EIO, "settings-save-eio")
+            return real_save(settings)
+
+        log_messages, original_log = self._capture_common_log()
+        try:
+            with mock.patch.object(Settings, "save", flaky):
+                messages = self._click_save_archive(widget, "kept-label")
+        finally:
+            self._restore_common_log(original_log)
+
+        saved = strings._("gui_identity_backup_archive_saved")
+        error = strings._("gui_identity_backup_archive_error")
+        self.assertTrue(saved in messages)
+        self.assertFalse(error in messages)
+        self.assertTrue(calls["n"] >= 2)
+        self.assertTrue(os.path.isfile(record_path))
+        fresh = Settings(self.gui.common)
+        fresh.load()
+        self.assertTrue(identity["service_id"] in fresh.get("saved_services"))
+        blobs = self._log_blobs(log_messages)
+        blobs.append("\n".join(messages))
+        for blob in blobs:
+            self.assertFalse("settings-save-eio" in str(blob))
+        try:
+            SavedServices(self.gui.common, self.gui.common.settings).delete(
+                identity["service_id"]
+            )
+        except Exception:
+            pass

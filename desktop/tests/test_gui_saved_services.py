@@ -412,17 +412,21 @@ class SavedServicesCase(GuiBaseTest):
                 self.assertTrue("this computer" in disclosure)
                 self.assertEqual(dialog.table.rowCount(), 2)
                 self.assertFalse(dialog.open_button.isEnabled())
+                self.assertFalse(dialog.export_button.isEnabled())
+                self.assertTrue(dialog.import_button.isEnabled())
 
                 row = self._select(dialog, identity["service_id"])
                 self.assertTrue(dialog.open_button.isEnabled())
+                self.assertTrue(dialog.export_button.isEnabled())
                 self.assertEqual(dialog.table.item(row, 0).text(), label)
                 self.assertEqual(
                     dialog.table.item(row, 1).text(),
                     strings._("gui_tab_name_" + mode),
                 )
-                self.assertTrue(
-                    dialog.table.item(row, 2).text() == identity["service_id"]
-                )
+                shown_id = dialog.table.item(row, 2).text()
+                self.assertFalse(shown_id == identity["service_id"])
+                self.assertTrue(shown_id.startswith(identity["service_id"][:8]))
+                self.assertTrue(dialog.detail_onion.text() == identity["service_id"])
                 self.assertEqual(dialog.table.item(row, 3).text(), saved_at)
                 self.assertEqual(
                     dialog.table.item(row, 4).text(),
@@ -732,6 +736,28 @@ class SavedServicesCase(GuiBaseTest):
         if "w4-fsync-eio" in blobs:
             raise AssertionError("fsync error text was logged")
 
+    def run_empty_manager(self):
+        dialog = SavedServicesDialog(self.gui.common, self.gui.tabs)
+        self._dialog = dialog
+        dialog.show()
+        self.gui.qtapp.processEvents()
+        self.assertEqual(dialog.windowTitle(), strings._("gui_saved_services_dialog_title"))
+        self.assertEqual(dialog.windowTitle(), "Saved Services")
+        self.assertTrue(dialog.empty_label.isVisible())
+        self.assertTrue(dialog.empty_label.text().startswith("No saved services yet"))
+        self.assertTrue(dialog.disclosure_label.isVisible())
+        disclosure = dialog.disclosure_label.text().lower()
+        self.assertTrue("unencrypted" in disclosure)
+        self.assertTrue("not an encrypted backup" in disclosure)
+        self.assertEqual(dialog.table.rowCount(), 0)
+        self.assertFalse(dialog.table.isVisible())
+        self.assertTrue(dialog.import_button.isEnabled())
+        self.assertTrue(dialog.import_button.isDefault())
+        self.assertFalse(dialog.open_button.isEnabled())
+        self.assertFalse(dialog.export_button.isEnabled())
+        self.assertFalse(dialog.rename_button.isEnabled())
+        self.assertFalse(dialog.delete_button.isEnabled())
+
     def _assert_table_matches_disk(self, dialog):
         self.gui.common.settings.load()
         listed = []
@@ -772,6 +798,17 @@ def test_symlinked_archive_directory_shows_list_error(
     case.setUp()
     try:
         case.run_symlinked_archive_list_error()
+    finally:
+        case.tearDown()
+
+
+def test_manager_empty_state_and_disabled_actions(saved_services_case, caplog, capsys):
+    case = saved_services_case("run_empty_manager")
+    case.caplog = caplog
+    case.capsys = capsys
+    case.setUp()
+    try:
+        case.run_empty_manager()
     finally:
         case.tearDown()
 

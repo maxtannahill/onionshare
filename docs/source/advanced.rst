@@ -40,7 +40,7 @@ OnionShare does not store the passphrase.
 Without those six words, the backup cannot be restored.
 
 The QR code is the encrypted backup.
-It is the same text as the file you save with "Save to file…", and it does not contain the passphrase.
+It is the same text as the file you save with "Save backup file", and it does not contain the passphrase.
 The backup does not include files you are sharing, a receive folder, a website title, or a schedule.
 
 Import a backup
