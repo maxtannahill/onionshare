@@ -413,6 +413,7 @@ class SavedServicesCase(GuiBaseTest):
                 self.assertEqual(dialog.table.rowCount(), 2)
                 self.assertFalse(dialog.open_button.isEnabled())
                 self.assertFalse(dialog.export_button.isEnabled())
+                self.assertTrue(dialog.import_button.isEnabled())
 
                 row = self._select(dialog, identity["service_id"])
                 self.assertTrue(dialog.open_button.isEnabled())
@@ -953,6 +954,8 @@ class SavedServicesCase(GuiBaseTest):
         self.assertTrue("not an encrypted backup" in disclosure)
         self.assertEqual(dialog.table.rowCount(), 0)
         self.assertFalse(dialog.table.isVisible())
+        self.assertTrue(dialog.import_button.isEnabled())
+        self.assertTrue(dialog.import_button.isDefault())
         self.assertFalse(dialog.open_button.isEnabled())
         self.assertFalse(dialog.export_button.isEnabled())
         self.assertFalse(dialog.rename_button.isEnabled())

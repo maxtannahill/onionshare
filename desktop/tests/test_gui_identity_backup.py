@@ -27,7 +27,8 @@ from onionshare_cli import saved_services as saved_services_module
 from onionshare_cli.saved_services import SavedServices
 from onionshare_cli.settings import Settings
 
-from onionshare import identity_backup_dialog, strings
+from onionshare import identity_backup_dialog, identity_import_dialog, strings
+from onionshare.identity_import_dialog import ImportIdentityDialog
 from onionshare.identity_backup_dialog import identity_for_open_tab
 from onionshare.tab.server_status import ServerStatus
 from onionshare.widgets import Alert, QRCodeDialog, qr_code_pixmap
@@ -1192,6 +1193,62 @@ class TestIdentityBackupGui(GuiBaseTest):
         finally:
             release.set()
 
+    def test_abandoned_import_does_not_open_or_archive(self):
+        started = threading.Event()
+        release = threading.Event()
+        dialogs = []
+        tabs_before = self.gui.tabs.count()
+        saved_before = list(self.gui.common.settings.get("saved_services"))
+
+        def blocked(text, passphrase):
+            started.set()
+            release.wait(timeout=30)
+            return {"discarded": True}
+
+        def record_exec(box, *args, **kwargs):
+            dialogs.append(True)
+            return QtWidgets.QMessageBox.StandardButton.Cancel
+
+        dialog = ImportIdentityDialog(self.gui.common, self.gui.tabs)
+        try:
+            with mock.patch.object(
+                identity_import_dialog, "decrypt_identity", blocked
+            ):
+                with mock.patch.object(QtWidgets.QMessageBox, "exec", record_exec):
+                    dialog._start_decrypt("{}", "not-a-real-passphrase")
+                    self._wait_until(started.is_set)
+                    with mock.patch.object(
+                        identity_import_dialog, "_DECRYPT_THREAD_WAIT_MS", 80
+                    ):
+                        finished = dialog.shutdown_decrypt_thread(abandon=True)
+                    if finished:
+                        raise AssertionError("abandon reported the worker finished")
+                    if dialog._accepting_results:
+                        raise AssertionError("quit re-armed the import worker")
+                    release.set()
+                    self._wait_until(
+                        lambda: not dialog.decrypt_thread.isRunning()
+                    )
+                    for _ in range(20):
+                        self.gui.qtapp.processEvents()
+                    if dialogs:
+                        raise AssertionError("quit applied the import result")
+                    if self.gui.tabs.count() != tabs_before:
+                        raise AssertionError("abandoned import opened a tab")
+                    if (
+                        list(self.gui.common.settings.get("saved_services"))
+                        != saved_before
+                    ):
+                        raise AssertionError("abandoned import wrote an archive id")
+        finally:
+            release.set()
+            try:
+                if dialog.decrypt_thread is not None and dialog.decrypt_thread.isRunning():
+                    dialog.decrypt_thread.wait(5000)
+                dialog.close()
+            except RuntimeError:
+                pass
+
     def test_reject_clears_export_identity_and_passphrase(self):
         def fast(identity, passphrase):
             return "{}"
@@ -1526,6 +1583,81 @@ class TestIdentityBackupGui(GuiBaseTest):
                     pass
             os.rmdir(directory)
 
+    def test_reject_clears_import_passphrase(self):
+        dialog = ImportIdentityDialog(self.gui.common, self.gui.tabs)
+        dialog.passphrase_edit.setText("alpha-bravo-charlie-delta-echo-foxtrot")
+        dialog.reject()
+        if dialog.passphrase_edit.text() != "":
+            raise AssertionError("passphrase field was not cleared")
+        dialog.deleteLater()
+
+    def test_abandon_releases_keeper_when_wait_misses_finished_worker(self):
+        """wait() reports a timeout after the worker has already finished."""
+
+        def fast(text, passphrase):
+            return {"discarded": True}
+
+        dialog = ImportIdentityDialog(self.gui.common, self.gui.tabs)
+        try:
+            with mock.patch.object(
+                identity_import_dialog, "decrypt_identity", fast
+            ):
+                thread = identity_import_dialog.DecryptIdentityThread(
+                    "{}", "not-used"
+                )
+                thread.success.connect(dialog._decrypt_succeeded)
+                thread.error.connect(dialog._decrypt_failed)
+                thread.start()
+                thread.wait(5000)
+            if thread._identity is None:
+                raise AssertionError("worker did not keep a result to discard")
+            thread.isRunning = lambda: True
+            thread.wait = lambda _timeout: False
+            dialog.decrypt_thread = thread
+            dialog.decrypt_threads = [thread]
+            dialog.shutdown_decrypt_thread(abandon=True)
+            keeper = identity_import_dialog._abandoned_thread_keeper
+            if keeper is None or thread in keeper._threads:
+                raise AssertionError("abandon keeper was not released")
+            if thread._identity is not None:
+                raise AssertionError("worker kept a discarded identity")
+        finally:
+            try:
+                dialog.close()
+            except RuntimeError:
+                pass
+
+    def test_shutdown_during_successful_decrypt_drops_worker_identity(self):
+        started = threading.Event()
+
+        def slow(text, passphrase):
+            started.set()
+            time.sleep(0.4)
+            return {"discarded": True}
+
+        dialog = ImportIdentityDialog(self.gui.common, self.gui.tabs)
+        dialog.passphrase_edit.setText("alpha-bravo-charlie-delta-echo-foxtrot")
+        try:
+            with mock.patch.object(
+                identity_import_dialog, "decrypt_identity", slow
+            ):
+                dialog._start_decrypt("{}", "alpha-bravo-charlie-delta-echo-foxtrot")
+                self._wait_until(started.is_set)
+                thread = dialog.decrypt_thread
+                dialog.shutdown_decrypt_thread()
+            if getattr(thread, "_identity", None) is not None:
+                raise AssertionError("worker kept a discarded identity")
+            dialog.reject()
+            if dialog.passphrase_edit.text() != "":
+                raise AssertionError("passphrase field was not cleared")
+        finally:
+            try:
+                if dialog.decrypt_thread is not None and dialog.decrypt_thread.isRunning():
+                    dialog.decrypt_thread.wait(5000)
+                dialog.close()
+            except RuntimeError:
+                pass
+
     def test_export_dialog_presentation(self):
         """Titles, sections, actions, collapsed Advanced, and crisp QR."""
         envelope = (
@@ -1662,6 +1794,45 @@ class TestIdentityBackupGui(GuiBaseTest):
                 self._wait_until(lambda: not any(thread.isRunning() for thread in running))
         finally:
             release.set()
+
+    def test_quit_does_not_block_on_import_worker(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked(text, passphrase):
+            started.set()
+            release.wait(timeout=30)
+            return {"discarded": True}
+
+        dialog = ImportIdentityDialog(self.gui.common, self.gui.tabs)
+        try:
+            with mock.patch.object(
+                identity_import_dialog, "decrypt_identity", blocked
+            ):
+                dialog._start_decrypt("{}", "not-a-real-passphrase")
+                self._wait_until(started.is_set)
+                started_at = time.monotonic()
+                finished = dialog.shutdown_decrypt_thread(abandon=True)
+                elapsed = time.monotonic() - started_at
+                if elapsed >= 2.0:
+                    raise AssertionError("quit waited on the import worker")
+                if finished:
+                    raise AssertionError("abandon reported the worker finished")
+                if dialog._accepting_results:
+                    raise AssertionError("quit re-armed the import worker")
+                keeper = identity_import_dialog._abandoned_thread_keeper
+                if keeper is None or not any(
+                    thread.isRunning() for thread in list(keeper._threads)
+                ):
+                    raise AssertionError("running import worker was not retained")
+        finally:
+            release.set()
+            try:
+                if dialog.decrypt_thread is not None and dialog.decrypt_thread.isRunning():
+                    dialog.decrypt_thread.wait(5000)
+                dialog.close()
+            except RuntimeError:
+                pass
 
     def _click_save_archive(self, widget, label):
         messages = []
