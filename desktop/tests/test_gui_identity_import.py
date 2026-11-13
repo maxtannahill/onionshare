@@ -1206,7 +1206,6 @@ class IdentityImportCase(GuiBaseTest):
 
     def run_cancel_before_write(self, envelopes, stage):
         """Canceling disclosure or the label writes nothing and opens nothing."""
-        identity = envelopes["receive"]["identity"]
         before = None
         messages = []
         calls = []
@@ -1253,7 +1252,6 @@ class IdentityImportCase(GuiBaseTest):
 
     def run_invalid_label(self, envelopes):
         """A control character in the label writes nothing and opens nothing."""
-        identity = envelopes["share"]["identity"]
         before = None
         messages = []
         calls = []

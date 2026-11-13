@@ -655,7 +655,6 @@ class SavedServicesCase(GuiBaseTest):
             with open(marker, "wb") as handle:
                 handle.write(b"untouched")
             alerts = []
-            real_exec = QtWidgets.QMessageBox.exec
 
             def record_exec(box, *args, **kwargs):
                 alerts.append(box.text())
