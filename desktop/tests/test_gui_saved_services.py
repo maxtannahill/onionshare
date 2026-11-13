@@ -14,6 +14,7 @@ import inspect
 import json
 import logging
 import os
+import tempfile
 from unittest import mock
 
 import pytest
@@ -631,12 +632,67 @@ class SavedServicesCase(GuiBaseTest):
             self.gui.common.log = original_log
             self.gui.common.gui.onion.connected_to_tor = False
 
+    def run_symlinked_archive_list_error(self):
+        identity = _sibling_identity()
+        archive = SavedServices(self.gui.common, self.gui.common.settings)
+        archive.add(identity, "w4-link")
+        data_dir = self.gui.common.build_data_dir()
+        directory = os.path.join(data_dir, "saved_services")
+        record_name = identity["service_id"] + ".json"
+        with open(os.path.join(directory, record_name), "rb") as handle:
+            before = handle.read()
+        holder = tempfile.TemporaryDirectory()
+        target = os.path.join(holder.name, "archive-target")
+        marker = os.path.join(target, "marker.txt")
+        try:
+            os.rename(directory, target)
+            os.symlink(target, directory)
+            with open(marker, "wb") as handle:
+                handle.write(b"untouched")
+            alerts = []
+            real_exec = QtWidgets.QMessageBox.exec
+
+            def record_exec(box, *args, **kwargs):
+                alerts.append(box.text())
+                return QtWidgets.QMessageBox.StandardButton.Ok
+
+            with mock.patch.object(QtWidgets.QMessageBox, "exec", record_exec):
+                dialog = SavedServicesDialog(self.gui.common, self.gui.tabs)
+                self._dialog = dialog
+            if strings._("gui_saved_services_list_error") not in alerts:
+                raise AssertionError("manager did not show the list error")
+            if dialog.table.rowCount() != 0:
+                raise AssertionError("symlinked archive still filled the table")
+            with open(os.path.join(target, record_name), "rb") as handle:
+                if handle.read() != before:
+                    raise AssertionError("symlink target record changed")
+            with open(marker, "rb") as handle:
+                if handle.read() != b"untouched":
+                    raise AssertionError("symlink target marker changed")
+        finally:
+            if os.path.islink(directory):
+                os.unlink(directory)
+            holder.cleanup()
+
 
 @pytest.fixture(scope="module")
 def saved_services_case():
     SavedServicesCase.setUpClass()
     yield SavedServicesCase
     SavedServicesCase.tearDownClass()
+
+
+def test_symlinked_archive_directory_shows_list_error(
+    saved_services_case, caplog, capsys
+):
+    case = saved_services_case("run_symlinked_archive_list_error")
+    case.caplog = caplog
+    case.capsys = capsys
+    case.setUp()
+    try:
+        case.run_symlinked_archive_list_error()
+    finally:
+        case.tearDown()
 
 
 @pytest.mark.parametrize("mode", ["share", "receive", "website", "chat"])

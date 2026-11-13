@@ -607,6 +607,24 @@ class TestSavedServices:
         assert store.settings.get("saved_services") == []
         assert _reload(store).get("saved_services") == []
 
+    def test_symlinked_archive_directory_list_raises(self, store, tmp_path):
+        identity = _identity(public=True)
+        store.add(identity, "kept", saved_at=_SAVED_AT)
+        data_dir = store.common.build_data_dir()
+        directory = os.path.join(data_dir, "saved_services")
+        target = tmp_path / "archive-target"
+        os.rename(directory, target)
+        os.symlink(target, directory)
+        marker = target / "marker.txt"
+        marker.write_bytes(b"untouched")
+        record = target / (identity["service_id"] + ".json")
+        before = record.read_bytes()
+        with pytest.raises(saved_services.SavedServicesError, match="symlink"):
+            store.list()
+        assert os.path.islink(directory)
+        assert marker.read_bytes() == b"untouched"
+        assert record.read_bytes() == before
+
     def test_failed_replace_leaves_no_temp_file_or_record(self, store, monkeypatch):
         identity = _identity(public=True)
 

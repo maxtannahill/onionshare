@@ -259,9 +259,12 @@ class SavedServices(object):
     def list(self):
         """Return readable archived records in ``saved_services`` order.
 
-        A missing, damaged, or symlinked id is skipped. ``get`` still raises
-        for that id, and one bad entry does not hide the others.
+        A directory-level failure, including a symlinked archive directory,
+        is raised. A missing, damaged, or symlinked record is skipped.
+        ``get`` still raises for that id, and one bad entry does not hide
+        the others.
         """
+        self._archive_dir(create=False)
         records = []
         for service_id in self._saved_id_list():
             try:
