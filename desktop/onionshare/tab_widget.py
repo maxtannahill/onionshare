@@ -242,8 +242,7 @@ class TabWidget(QtWidgets.QTabWidget):
         """
         Open a six-key identity as a new stopped tab.
 
-        Prompt 5 (import from a file or pasted text) calls this and does not
-        open a tab itself::
+        Import calls this and does not open a tab itself::
 
             tab = tab_widget.open_saved_service(identity, label=None)
 
@@ -253,7 +252,7 @@ class TabWidget(QtWidgets.QTabWidget):
         does not read or write an archive record, and does not call
         ``start_server``.
 
-        ``label`` is accepted so the manager and Prompt 5 can pass an archive
+        ``label`` is accepted so the manager and import can pass an archive
         label. It is not written into ModeSettings, not logged, and not
         required. Titles, filenames, and autostart stay at the new-tab
         defaults.
