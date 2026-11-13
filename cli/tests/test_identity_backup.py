@@ -750,3 +750,126 @@ class TestRoundTrip:
         assert "common.log" not in source
         assert "print(" not in source
         assert "logging." not in source
+
+
+_STUB_PASSPHRASE = "w4-stub-passphrase-value"
+_PLAINTEXT_MARKER = "W4PLAINTEXTMARKER"
+
+
+def _fast_kdf(size, password, salt, opslimit=None, memlimit=None, **kwargs):
+    if isinstance(password, str):
+        password = password.encode("utf-8")
+    digest = hashlib.blake2s(bytes(password) + bytes(salt), digest_size=32).digest()
+    return digest[:size]
+
+
+def _envelope_over(plaintext, passphrase):
+    salt = b"\x51" * 16
+    nonce = b"\x52" * 24
+    key = _fast_kdf(32, passphrase.strip().encode("utf-8"), salt)
+    ciphertext = nacl.secret.SecretBox(key).encrypt(plaintext, nonce).ciphertext
+    return _dumps(
+        {
+            "v": 1,
+            "kdf": "argon2id",
+            "t": 2,
+            "m": 67108864,
+            "p": 1,
+            "salt": base64.b64encode(salt).decode("ascii"),
+            "n": base64.b64encode(nonce).decode("ascii"),
+            "ct": base64.b64encode(ciphertext).decode("ascii"),
+        }
+    )
+
+
+def _inspect_failure(err):
+    passphrase = _STUB_PASSPHRASE
+    marker = _PLAINTEXT_MARKER
+    if err is None or type(err) is not IdentityBackupError or str(err) != GENERIC:
+        raise AssertionError("expected the generic identity backup error")
+    if err.__context__ is not None or err.__cause__ is not None:
+        raise AssertionError("generic error is chained")
+    tb = err.__traceback__
+    while tb is not None:
+        filename = tb.tb_frame.f_code.co_filename
+        if filename.endswith("/identity_backup.py") and _frame_holds_secret(
+            tb.tb_frame, (passphrase, marker)
+        ):
+            raise AssertionError(
+                "traceback frame holds a secret local: "
+                + tb.tb_frame.f_code.co_name
+            )
+        tb = tb.tb_next
+    passphrase = None
+    marker = None
+
+
+def _frame_holds_secret(frame, secrets):
+    seen = set()
+
+    def holds(value):
+        if id(value) in seen:
+            return False
+        seen.add(id(value))
+        if isinstance(value, str):
+            return any(secret in value for secret in secrets)
+        if isinstance(value, (bytes, bytearray)):
+            return any(secret.encode("utf-8") in value for secret in secrets)
+        if isinstance(value, dict):
+            return any(holds(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(holds(item) for item in value)
+        return False
+
+    return any(holds(value) for value in frame.f_locals.values())
+
+
+class TestGenericErrorDoesNotChainSecrets:
+    def test_failures_have_no_context_cause_or_secret_locals(self, monkeypatch):
+        monkeypatch.setattr(
+            "onionshare_cli.identity_backup.argon2id.kdf",
+            _fast_kdf,
+        )
+        good = _envelope_over(
+            _canonical(
+                _identity("share", public=True, client_auth=False)
+            ).encode("utf-8"),
+            _STUB_PASSPHRASE,
+        )
+        flipped = _flip_field(good, "ct")
+        truncated = _envelope_over(
+            ('{"marker":"' + _PLAINTEXT_MARKER).encode("utf-8"),
+            _STUB_PASSPHRASE,
+        )
+        non_utf8 = _envelope_over(
+            b"\xff" + _PLAINTEXT_MARKER.encode("utf-8") + b"\xfe",
+            _STUB_PASSPHRASE,
+        )
+        wrong = (good, "not-the-stub-passphrase")
+        same = (flipped, _STUB_PASSPHRASE)
+        cases = (
+            ("{", _STUB_PASSPHRASE),
+            (_dumps(_skeleton(salt="!!!!")), _STUB_PASSPHRASE),
+            ("\ud800", _STUB_PASSPHRASE),
+            wrong,
+            same,
+            (truncated, _STUB_PASSPHRASE),
+            (non_utf8, _STUB_PASSPHRASE),
+        )
+        seen = []
+        for text, passphrase in cases:
+            seen.append(_raise_clean(text, passphrase))
+        if {(type(err), str(err)) for err in seen} != {(IdentityBackupError, GENERIC)}:
+            raise AssertionError("wrong passphrase and tamper were distinguished")
+
+
+def _raise_clean(text, passphrase):
+    err = None
+    try:
+        decrypt_identity(text, passphrase)
+    except IdentityBackupError as caught:
+        err = caught
+    text = None
+    passphrase = None
+    _inspect_failure(err)
+    return err
