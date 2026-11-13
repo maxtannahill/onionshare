@@ -430,8 +430,13 @@ class SavedServices(object):
         if os.path.islink(directory):
             raise SavedServicesError("saved_services directory is a symlink")
         if create:
-            os.makedirs(directory, 0o700, True)
-            os.chmod(directory, 0o700)
+            try:
+                os.makedirs(directory, 0o700, True)
+                os.chmod(directory, 0o700)
+            except OSError:
+                raise SavedServicesError(
+                    "saved_services directory could not be created"
+                ) from None
         return directory
 
     def _record_path(self, directory, service_id):
