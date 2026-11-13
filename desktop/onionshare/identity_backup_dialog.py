@@ -26,7 +26,6 @@ import tempfile
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from onionshare_cli.identity_backup import (
-    IdentityBackupError,
     encrypt_identity,
     generate_passphrase,
     identity_from_mode_settings,
