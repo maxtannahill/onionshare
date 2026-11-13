@@ -18,6 +18,64 @@ Each service then can be started manually, and will be available on the same Oni
 
 If you save a tab, a copy of its onion service secret key is stored on your computer.
 
+.. _identity_backups:
+
+Identity backups and Saved Services
+-----------------------------------
+
+Share, Receive, Website, and Chat tabs can export their onion identity, and can store a copy in Saved Services.
+An identity backup is an encrypted copy of that onion service, for keeping somewhere else.
+Saved Services is a separate list, on this computer, of identities you can open again later.
+Download mode connects to someone else's share. It has no onion identity, so these controls are not shown there.
+
+Export an encrypted backup
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+On a Share, Receive, Website, or Chat tab that already has an onion identity, click "Export identity backup…".
+The button stays available while the server is stopped.
+
+OnionShare shows a six-word passphrase.
+Write it down and keep it separate from the backup file and from the QR code.
+OnionShare does not store the passphrase.
+Without those six words, the backup cannot be restored.
+
+The QR code is the encrypted backup.
+It is the same text as the file you save with "Save to file…", and it does not contain the passphrase.
+The backup does not include files you are sharing, a receive folder, a website title, or a schedule.
+
+Import a backup
+^^^^^^^^^^^^^^^
+
+Open the Settings tab and click "Saved Services…", then "Import backup…".
+Choose a backup file, or paste the backup text, and type the passphrase as one hyphen-joined string.
+OnionShare does not split that string on hyphens.
+Only spaces before or after the passphrase are ignored.
+
+A successful import saves the identity in Saved Services and opens it in a new tab.
+That tab is stopped.
+OnionShare does not start it, and it does not check "Always open this tab when OnionShare is started" or "Automatically start this onion service when OnionShare starts".
+If that onion service is already open, OnionShare does not open a second copy, and it does not start or stop either service.
+A wrong passphrase or a damaged backup does not open a tab and does not save the service.
+
+Saved Services
+^^^^^^^^^^^^^^
+
+From a Share, Receive, Website, or Chat tab, "Save to Saved Services…" keeps that onion identity on this computer.
+Open the list from the Settings tab with "Saved Services…".
+From there you can open a service, rename its label, delete it, or import a backup.
+
+**Saved Services stores onion service keys unencrypted on this computer.**
+Anyone who can read this computer's OnionShare data can read those private keys.
+This is not an encrypted backup.
+Use the export file and its passphrase, kept separate, when the copy has to leave this computer.
+
+Opening a saved service creates a stopped tab.
+OnionShare does not start it, and it does not add it to the tabs that open automatically when OnionShare starts.
+If that onion service is already open, OnionShare warns you and does not start or stop either service.
+Renaming changes only the label.
+Deleting removes that saved service.
+It does not change persistent tabs, and it does not start or stop a service that is already open.
+
 .. _turn_off_private_key:
 
 Turn Off Private Key
@@ -342,6 +400,7 @@ bridges_moat         ``string``  When ``bridges_type`` is set to "moat", the bri
 bridges_custom       ``string``  When ``bridges_type`` is set to "custom", the bridges specified by the user are stored here. Separate each bridge line in the string with '\n'. Default: ""
 bridges_builtin      ``dict``    When ``bridges_type`` is set to "built-in", OnionShare obtains the latest built-in bridges recommended by Tor and stores them here. Default: {}
 persistent_tabs      ``list``    If the user has defined any tabs as 'saved' (meaning that they are persistent each time OnionShare starts, and their onion address doesn't change), these are given a random identifier which gets listed here. The persistent onion is stored as a JSON file with the same name as this identifier, in a subfolder of the OnionShare configuration folder called 'persistent'. Default: []
+saved_services       ``list``    Onion service ids kept by Saved Services. The private keys for those ids are stored unencrypted in the OnionShare data folder, separate from ``persistent_tabs``. Default: []
 locale               ``string``  The locale used in OnionShare. Default: None (which is the same as 'en'). For valid locale codes, see 'available_locales' in https://github.com/onionshare/onionshare/blob/main/cli/onionshare_cli/settings.py
 theme                ``boolean`` The theme for the OnionShare desktop app. Valid options are 0 (automatically detect the user's computer's light or dark theme), 1 (light) or 2 (dark).
 ==================== =========== ===========
