@@ -24,6 +24,7 @@ import datetime
 from onionshare_cli.settings import Settings
 
 from . import strings
+from .saved_services_dialog import SavedServicesDialog
 from .widgets import Alert
 from .update_checker import UpdateThread
 
@@ -116,6 +117,17 @@ class SettingsTab(QtWidgets.QWidget):
         theme_layout.addWidget(self.theme_combobox)
         theme_layout.addStretch()
 
+        # Saved Services manager. Opening an archived identity never starts it.
+        self.saved_services_button = QtWidgets.QPushButton(
+            strings._("gui_settings_saved_services_button")
+        )
+        self.saved_services_button.setObjectName("saved_services_button")
+        self.saved_services_button.clicked.connect(self.saved_services_clicked)
+        saved_services_layout = QtWidgets.QHBoxLayout()
+        saved_services_layout.addStretch()
+        saved_services_layout.addWidget(self.saved_services_button)
+        saved_services_layout.addStretch()
+
         # Version and help
         version_label = QtWidgets.QLabel(
             strings._("gui_settings_version_label").format(self.common.version)
@@ -151,6 +163,8 @@ class SettingsTab(QtWidgets.QWidget):
             layout.addSpacing(20)
         layout.addLayout(language_layout)
         layout.addLayout(theme_layout)
+        layout.addSpacing(20)
+        layout.addLayout(saved_services_layout)
         layout.addSpacing(20)
         layout.addWidget(version_label)
         layout.addWidget(help_label)
@@ -251,6 +265,26 @@ class SettingsTab(QtWidgets.QWidget):
         forced_update_thread.update_error.connect(update_error)
         forced_update_thread.update_invalid_version.connect(update_invalid_version)
         forced_update_thread.start()
+
+    def saved_services_clicked(self):
+        """
+        Open the Saved Services manager.
+
+        The manager lists the plaintext archive and opens a service through
+        TabWidget.open_saved_service. It does not start a server.
+        """
+        self.common.log("SettingsTab", "saved_services_clicked")
+        tab_widget = None
+        parent = self.parent
+        if parent is not None:
+            tab_widget = getattr(parent, "parent", None)
+        if tab_widget is None or not hasattr(tab_widget, "open_saved_service"):
+            Alert(self.common, strings._("gui_saved_services_open_error"))
+            return
+        self.saved_services_dialog = SavedServicesDialog(
+            self.common, tab_widget, parent=self
+        )
+        self.saved_services_dialog.exec()
 
     def save_clicked(self):
         """
