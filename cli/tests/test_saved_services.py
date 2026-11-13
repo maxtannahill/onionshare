@@ -9,6 +9,7 @@ import nacl.signing
 import pytest
 
 from onionshare_cli import common, saved_services, settings
+from onionshare_cli.identity_backup import validate_identity
 
 
 _SAVED_AT = "2026-11-13T03:22:00Z"
@@ -573,3 +574,133 @@ class TestSavedServices:
         assert set(record) == set(identity) | {"label", "saved_at"}
         for token in ("filenames", "data_dir", "webhook", "autostart", "title"):
             assert token not in record
+
+    def test_persistent_json_fixture_identity_is_accepted(self, store):
+        path = os.path.join(os.path.dirname(__file__), "persistent.json")
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        identity = {
+            "mode": document["persistent"]["mode"],
+            "service_id": document["general"]["service_id"],
+            "private_key": document["onion"]["private_key"],
+            "client_auth_priv_key": document["onion"]["client_auth_priv_key"],
+            "client_auth_pub_key": document["onion"]["client_auth_pub_key"],
+            "public": document["general"]["public"],
+        }
+        assert validate_identity(identity) == identity
+        record = saved_services.build_record(identity, "fixture", saved_at=_SAVED_AT)
+        assert record["service_id"] == identity["service_id"]
+        assert record["private_key"] == identity["private_key"]
+        stored = store.add(identity, "fixture", saved_at=_SAVED_AT)
+        assert stored["private_key"] == identity["private_key"]
+        assert store.get(identity["service_id"])["client_auth_pub_key"] == (
+            identity["client_auth_pub_key"]
+        )
+
+    def test_symlinked_archive_directory_is_rejected(self, store, tmp_path):
+        data_dir = store.common.build_data_dir()
+        target = tmp_path / "archive-target"
+        target.mkdir()
+        link = os.path.join(data_dir, "saved_services")
+        os.symlink(target, link)
+        identity = _identity(public=True)
+        with pytest.raises(saved_services.SavedServicesError, match="symlink"):
+            store.add(identity, "label", saved_at=_SAVED_AT)
+        assert os.path.islink(link)
+        assert os.listdir(target) == []
+        assert store.settings.get("saved_services") == []
+        assert _reload(store).get("saved_services") == []
+
+    def test_failed_replace_leaves_no_temp_file_or_record(self, store, monkeypatch):
+        identity = _identity(public=True)
+
+        def fail_replace(source, destination):
+            raise OSError("replace failed")
+
+        monkeypatch.setattr(saved_services.os, "replace", fail_replace)
+        with pytest.raises(OSError, match="replace failed"):
+            store.add(identity, "label", saved_at=_SAVED_AT)
+        archive = os.path.join(store.common.build_data_dir(), "saved_services")
+        assert os.path.isdir(archive)
+        assert not os.path.islink(archive)
+        assert os.listdir(archive) == []
+        assert stat.S_IMODE(os.lstat(archive).st_mode) == 0o700
+        assert not os.path.exists(_record_path(store, identity["service_id"]))
+        assert store.settings.get("saved_services") == []
+        assert _reload(store).get("saved_services") == []
+
+    def test_fractional_saved_at_is_accepted_on_read(self, store):
+        identity = _identity(public=True)
+        stored = store.add(identity, "label")
+        assert "." not in stored["saved_at"]
+        assert len(stored["saved_at"]) == len("2026-11-13T03:22:00Z")
+        assert stored["saved_at"].endswith("Z")
+        path = _record_path(store, identity["service_id"])
+        document = json.loads(_read(path))
+        document["saved_at"] = "2026-11-13T03:22:00.123456Z"
+        with open(path, "wb") as handle:
+            handle.write(_canonical(document))
+        loaded = store.get(identity["service_id"])
+        assert loaded["saved_at"] == "2026-11-13T03:22:00.123456Z"
+        assert loaded["private_key"] == identity["private_key"]
+
+    def test_deeply_nested_record_is_saved_services_error(self, store):
+        identity = _identity(public=True)
+        store.add(identity, "label", saved_at=_SAVED_AT)
+        path = _record_path(store, identity["service_id"])
+        nested = ('{"k":' * 10000) + "null" + ("}" * 10000)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(nested)
+        with pytest.raises(saved_services.SavedServicesError, match="corrupt") as caught:
+            store.get(identity["service_id"])
+        assert caught.value.__cause__ is None
+        assert _read(path) == nested.encode("utf-8")
+
+    def test_regular_file_at_archive_path_is_saved_services_error(self, store):
+        path = os.path.join(store.common.build_data_dir(), "saved_services")
+        payload = b"not a directory"
+        with open(path, "wb") as handle:
+            handle.write(payload)
+        identity = _identity(public=True)
+        with pytest.raises(
+            saved_services.SavedServicesError, match="could not be created"
+        ) as caught:
+            store.add(identity, "label", saved_at=_SAVED_AT)
+        assert caught.value.__cause__ is None
+        assert not os.path.isdir(path)
+        assert _read(path) == payload
+        assert store.settings.get("saved_services") == []
+
+    def test_record_with_an_extra_key_is_rejected(self, store):
+        identity = _identity(public=True)
+        store.add(identity, "label", saved_at=_SAVED_AT)
+        path = _record_path(store, identity["service_id"])
+        document = json.loads(_read(path))
+        document["filenames"] = ["/tmp/foo"]
+        extra = _canonical(document)
+        with open(path, "wb") as handle:
+            handle.write(extra)
+        with pytest.raises(
+            saved_services.SavedServicesError, match="missing or extra"
+        ) as caught:
+            store.get(identity["service_id"])
+        assert caught.value.__cause__ is None
+        assert _read(path) == extra
+        with pytest.raises(
+            saved_services.SavedServicesError, match="exactly the six"
+        ):
+            saved_services.build_record(document, "label", saved_at=_SAVED_AT)
+        projection = {key: document[key] for key in identity}
+        assert validate_identity(projection) == identity
+
+    def test_invalid_utf8_record_has_no_cause(self, store):
+        identity = _identity(public=True)
+        store.add(identity, "label", saved_at=_SAVED_AT)
+        path = _record_path(store, identity["service_id"])
+        blob = b"\xff"
+        with open(path, "wb") as handle:
+            handle.write(blob)
+        with pytest.raises(saved_services.SavedServicesError, match="corrupt") as caught:
+            store.get(identity["service_id"])
+        assert caught.value.__cause__ is None
+        assert _read(path) == blob

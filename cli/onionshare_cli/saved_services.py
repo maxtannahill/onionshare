@@ -97,6 +97,12 @@ def _validate_label(label):
 
 
 def _validate_saved_at(saved_at):
+    """
+    Accept an ISO 8601 UTC timestamp ending in ``Z``.
+
+    Readers tolerate an optional fractional second of 1 to 6 digits.
+    Writers still emit no fraction: ``_utc_now`` uses ``%Y-%m-%dT%H:%M:%SZ``.
+    """
     if type(saved_at) is not str or _SAVED_AT_RE.fullmatch(saved_at) is None:
         raise SavedServicesError("invalid saved_at")
     try:
