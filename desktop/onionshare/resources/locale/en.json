@@ -294,7 +294,7 @@
     "gui_saved_services_invalid_label": "A saved service label must be 0–100 characters and must not contain control characters.",
     "gui_saved_services_import_button": "Import backup…",
     "gui_identity_import_dialog_title": "Import identity backup",
-    "gui_identity_import_instructions": "Choose a backup file or paste the backup text. Type the passphrase as one hyphen-joined string. OnionShare does not split it on hyphens. Only spaces before or after the passphrase are ignored.",
+    "gui_identity_import_instructions": "Choose a backup file or paste the backup text. Type the passphrase as one hyphen-joined string. OnionShare does not split it on hyphens. Leading and trailing whitespace around the passphrase is ignored.",
     "gui_identity_import_paste_radio": "Pasted text",
     "gui_identity_import_file_radio": "Backup file",
     "gui_identity_import_paste_label": "Backup text",
