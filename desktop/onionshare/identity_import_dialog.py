@@ -45,6 +45,7 @@ from onionshare_cli.saved_services import SavedServices, SavedServicesError
 
 from . import strings
 from .gui_common import GuiCommon
+from .identity_backup_dialog import store_saved_identity
 from .widgets import Alert
 
 
@@ -54,8 +55,13 @@ _MAX_ENVELOPE_BYTES = 8192
 
 # One timed wait for the Argon2id worker. Interactive KDF is far shorter
 # than this; if it is still running afterwards a user close stays open. Quit
-# and DeferredDelete leave the worker disconnected and keep the QThread alive.
+# and DeferredDelete do not use this wait: they leave the worker disconnected
+# and keep the QThread alive without blocking the caller.
 _DECRYPT_THREAD_WAIT_MS = 180000
+
+# Quit and DeferredDelete. Zero does not block. A running QThread is retained
+# until it finishes and is never destroyed while running.
+_ABANDON_THREAD_WAIT_MS = 0
 
 
 class _AbandonedThreadKeeper(QtCore.QObject):
@@ -568,26 +574,38 @@ class ImportIdentityDialog(QtWidgets.QDialog):
                         strings._("gui_identity_backup_archive_not_replaced"),
                     )
                 return False
-            try:
-                archive.add(identity, label, replace=True)
-            except SavedServicesError as error:
-                Alert(self.common, _archive_failure_message(error))
-                return False
-            except Exception:
-                Alert(self.common, strings._("gui_identity_backup_archive_error"))
+            if not self._store_identity(archive, identity, label, True):
                 return False
             self.common.log("ImportIdentityDialog", "archive_replaced")
             return True
 
+        if not self._store_identity(archive, identity, label, False):
+            return False
+        self.common.log("ImportIdentityDialog", "archive_added")
+        return True
+
+    def _store_identity(self, archive, identity, label, replace):
+        """
+        Write the archive record.
+
+        A post-commit chmod, directory fsync, or settings error still counts
+        as saved. Nothing written is the failure alert. The exception text
+        is not shown or logged.
+        """
         try:
-            archive.add(identity, label, replace=False)
+            saved, warning = store_saved_identity(archive, identity, label, replace)
         except SavedServicesError as error:
             Alert(self.common, _archive_failure_message(error))
             return False
-        except Exception:
+        if not saved:
             Alert(self.common, strings._("gui_identity_backup_archive_error"))
             return False
-        self.common.log("ImportIdentityDialog", "archive_added")
+        if warning:
+            Alert(
+                self.common,
+                strings._("gui_identity_backup_archive_saved_warning"),
+                icon=QtWidgets.QMessageBox.Icon.Information,
+            )
         return True
 
     def _disconnect_thread(self, thread):
@@ -652,7 +670,8 @@ class ImportIdentityDialog(QtWidgets.QDialog):
             if not running:
                 _drop_worker_identity(thread)
                 continue
-            finished = thread.wait(_DECRYPT_THREAD_WAIT_MS)
+            wait_ms = _ABANDON_THREAD_WAIT_MS if abandon else _DECRYPT_THREAD_WAIT_MS
+            finished = thread.wait(wait_ms)
             try:
                 still_running = thread.isRunning()
             except RuntimeError:
