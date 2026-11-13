@@ -254,18 +254,42 @@ def _clear_clipboard_if_text(clipboard, phrase):
                 pass
 
 
-def _write_exact_bytes(path, payload):
+def _png_bytes(pixmap):
+    """PNG encoding of ``pixmap``, or None if Qt cannot encode it."""
+    if pixmap is None:
+        return None
+    buffer = QtCore.QBuffer()
+    if not buffer.open(QtCore.QIODevice.OpenModeFlag.WriteOnly):
+        return None
+    try:
+        if not pixmap.save(buffer, "PNG"):
+            return None
+        payload = bytes(buffer.data())
+    finally:
+        buffer.close()
+    if not payload:
+        return None
+    return payload
+
+
+def _write_exact_bytes(path, payload, *, private=False):
     """
     Replace ``path`` with ``payload`` via a temp file in the same directory.
 
     The destination is not opened for writing, so a failure leaves any
-    existing file byte-for-byte intact and removes the temp file.
+    existing file byte-for-byte intact and removes the temp file. When
+    ``private`` is true, the temp file is mode 0600 before any payload byte
+    is written, and that inode is what ``os.replace`` puts at ``path``.
     """
     directory = os.path.dirname(os.path.abspath(path)) or "."
     descriptor, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=directory)
     replaced = False
     try:
         try:
+            if private:
+                os.fchmod(descriptor, 0o600)
+                if os.fstat(descriptor).st_mode & 0o077:
+                    raise OSError("file mode is not private")
             with os.fdopen(descriptor, "wb") as handle:
                 descriptor = None
                 written = handle.write(payload)
@@ -820,7 +844,13 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         )
         if not filename:
             return
-        if not self._qr_source.save(filename, "PNG"):
+        png = _png_bytes(self._qr_source)
+        if png is None:
+            Alert(self.common, strings._("gui_identity_backup_save_qr_error"))
+            return
+        try:
+            _write_exact_bytes(filename, png, private=True)
+        except OSError:
             Alert(self.common, strings._("gui_identity_backup_save_qr_error"))
             return
         self.common.log("ExportIdentityBackupDialog", "save_qr_image")
