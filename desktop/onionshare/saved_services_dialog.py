@@ -30,6 +30,8 @@ decrypts on a worker thread and then calls that same helper. Neither
 path starts a server.
 """
 
+import re
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from onionshare_cli.identity_backup import generate_passphrase
@@ -56,6 +58,9 @@ _MODE_STRINGS = {
     "website": "gui_tab_name_website",
     "chat": "gui_tab_name_chat",
 }
+
+# Same service-id rule the archive uses before it builds a record path.
+_SERVICE_ID_RE = re.compile(r"^[a-z2-7]{56}$")
 
 
 def _confirm(common, message, icon, buttons, accept_button):
@@ -135,6 +140,7 @@ class SavedServicesDialog(QtWidgets.QDialog):
         self.common.log("SavedServicesDialog", "__init__")
         self.tab_widget = tab_widget
         self._records = {}
+        self._damaged_ids = set()
         self.import_dialog = None
         self.export_dialog = None
         self._close_in_progress = False
@@ -384,9 +390,58 @@ class SavedServicesDialog(QtWidgets.QDialog):
             4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
         )
 
+    def _listed_ids(self):
+        try:
+            current = self.common.settings.get("saved_services")
+        except Exception:
+            return []
+        if type(current) is not list:
+            return []
+        return [item for item in current if type(item) is str]
+
+    def _display_rows(self, records):
+        """
+        Valid records from ``list()``, plus a damaged id for each listed id
+        ``list()`` omitted.
+
+        ``list()`` itself is not changed. A damaged id is the service id
+        only. The record body is not returned. Ids that fail the archive's
+        service-id check are left out, because delete validates that shape
+        before it unlinks.
+        """
+        pending = [record for record in records if type(record) is dict]
+        rows = []
+        damaged_ids = []
+        seen_damaged = set()
+        archive = None
+        for service_id in self._listed_ids():
+            if pending and pending[0].get("service_id") == service_id:
+                rows.append(pending.pop(0))
+                continue
+            if service_id in seen_damaged:
+                continue
+            if _SERVICE_ID_RE.fullmatch(service_id) is None:
+                continue
+            if any(item.get("service_id") == service_id for item in pending):
+                continue
+            if archive is None:
+                archive = SavedServices(self.common, self.common.settings)
+            try:
+                loaded = archive.get(service_id)
+            except SavedServicesError:
+                rows.append(service_id)
+                damaged_ids.append(service_id)
+                seen_damaged.add(service_id)
+                continue
+            if type(loaded) is dict and loaded.get("service_id") == service_id:
+                rows.append(loaded)
+        rows.extend(pending)
+        return rows, damaged_ids
+
     def reload(self):
         """Replace the table with the current archive. Errors use a fixed string."""
         self._records = {}
+        self._damaged_ids = set()
         try:
             records = SavedServices(self.common, self.common.settings).list()
         except SavedServicesError:
@@ -399,14 +454,36 @@ class SavedServicesDialog(QtWidgets.QDialog):
             self._update_buttons()
             return
 
+        rows, damaged_ids = self._display_rows(records)
+        self._damaged_ids = set(damaged_ids)
         self.table.clear()
         self._restore_headers()
-        empty = len(records) == 0
+        empty = len(rows) == 0
         self.empty_label.setVisible(empty)
         self.table.setVisible(not empty)
         self.details_widget.setVisible(not empty)
         fixed = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
-        for record in records:
+        damaged_label = strings._("gui_saved_services_damaged_record")
+        damaged_details = strings._("gui_saved_services_damaged_details")
+        for entry in rows:
+            if type(entry) is str:
+                service_id = entry
+                values = [
+                    damaged_label,
+                    "",
+                    _short_service_id(service_id),
+                    "",
+                    "",
+                ]
+                item = QtWidgets.QTreeWidgetItem(values)
+                item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, service_id)
+                item.setFont(2, fixed)
+                item.setToolTip(0, damaged_details)
+                item.setToolTip(2, service_id)
+                self.table.addTopLevelItem(item)
+                continue
+            record = entry
             service_id = record["service_id"]
             self._records[service_id] = record
             if record["public"] is True:
@@ -435,6 +512,8 @@ class SavedServicesDialog(QtWidgets.QDialog):
     def open_selected(self):
         """Open the selected identity stopped. A duplicate warns and opens nothing."""
         self.common.log("SavedServicesDialog", "open_selected")
+        if self._selected_is_damaged():
+            return
         record = self._selected_record()
         if record is None:
             return
@@ -444,6 +523,8 @@ class SavedServicesDialog(QtWidgets.QDialog):
     def export_selected(self):
         """Open the backup dialog for the selected identity. The service stays stopped."""
         self.common.log("SavedServicesDialog", "export_selected")
+        if self._selected_is_damaged():
+            return
         record = self._selected_record()
         if record is None:
             return
@@ -466,6 +547,8 @@ class SavedServicesDialog(QtWidgets.QDialog):
     def rename_selected(self):
         """Update the selected record's label. The identity and saved_at stay."""
         self.common.log("SavedServicesDialog", "rename_selected")
+        if self._selected_is_damaged():
+            return
         record = self._selected_record()
         if record is None:
             return
@@ -504,8 +587,10 @@ class SavedServicesDialog(QtWidgets.QDialog):
         changed.
         """
         self.common.log("SavedServicesDialog", "delete_selected")
-        record = self._selected_record()
-        if record is None:
+        service_id = self._selected_service_id()
+        damaged = self._selected_is_damaged()
+        record = None if damaged else self._selected_record()
+        if record is None and not damaged:
             return
         confirmed = _confirm(
             self.common,
@@ -517,7 +602,8 @@ class SavedServicesDialog(QtWidgets.QDialog):
         )
         if not confirmed:
             return
-        service_id = record["service_id"]
+        if record is not None:
+            service_id = record["service_id"]
         try:
             SavedServices(self.common, self.common.settings).delete(service_id)
         except SavedServicesError:
@@ -535,9 +621,13 @@ class SavedServicesDialog(QtWidgets.QDialog):
             return None
         return service_id
 
+    def _selected_is_damaged(self):
+        service_id = self._selected_service_id()
+        return service_id is not None and service_id in self._damaged_ids
+
     def _selected_record(self):
         service_id = self._selected_service_id()
-        if service_id is None:
+        if service_id is None or service_id in self._damaged_ids:
             return None
         return self._records.get(service_id)
 
@@ -570,10 +660,26 @@ class SavedServicesDialog(QtWidgets.QDialog):
         self.detail_onion.setText(record["service_id"])
         self.detail_saved.setText(record["saved_at"])
 
+    def _show_damaged_details(self, service_id):
+        """Text label for an unreadable record. The record body is not shown."""
+        self.detail_label.setText(
+            strings._("gui_saved_services_damaged_record")
+            + "\n"
+            + strings._("gui_saved_services_damaged_details")
+        )
+        self.detail_mode.setText("")
+        self.detail_access.setText("")
+        self.detail_onion.setText(service_id)
+        self.detail_saved.setText("")
+
     def _update_buttons(self):
-        enabled = self._selected_service_id() is not None
-        self.open_button.setEnabled(enabled)
-        self.export_button.setEnabled(enabled)
-        self.rename_button.setEnabled(enabled)
-        self.delete_button.setEnabled(enabled)
-        self._show_details(self._selected_record() if enabled else None)
+        damaged = self._selected_is_damaged()
+        record = None if damaged else self._selected_record()
+        self.open_button.setEnabled(record is not None)
+        self.export_button.setEnabled(record is not None)
+        self.rename_button.setEnabled(record is not None)
+        self.delete_button.setEnabled(damaged or record is not None)
+        if damaged:
+            self._show_damaged_details(self._selected_service_id())
+        else:
+            self._show_details(record)

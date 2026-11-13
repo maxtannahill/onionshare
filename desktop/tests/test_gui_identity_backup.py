@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -1271,6 +1272,316 @@ class TestIdentityBackupGui(GuiBaseTest):
             raise AssertionError("export dialog kept identity or passphrase")
         if dialog.passphrase_label.text() != "":
             raise AssertionError("passphrase label was not cleared")
+
+    def _assert_clipboard_empty(self, clipboard):
+        """Fail without echoing clipboard text. It may be the recovery phrase."""
+        if clipboard.text() != "":
+            raise AssertionError("clipboard was not empty")
+        try:
+            supports_selection = clipboard.supportsSelection()
+        except Exception:
+            supports_selection = False
+        if supports_selection:
+            selection = clipboard.text(QtGui.QClipboard.Mode.Selection)
+            if selection != "":
+                raise AssertionError("selection clipboard was not empty")
+
+    def test_copied_passphrase_is_cleared_on_close_and_regenerate(self):
+        """
+        Copy must not leave the recovery phrase on the clipboard after the
+        dialog closes, is destroyed, or regenerates. Unrelated clipboard
+        text, including the envelope, stays put.
+        """
+
+        def fast(identity, passphrase):
+            return "{}"
+
+        clipboard = QtWidgets.QApplication.clipboard()
+        clipboard.clear()
+        self.gui.qtapp.processEvents()
+        with mock.patch.object(identity_backup_dialog, "encrypt_identity", fast):
+            dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                self.gui.common,
+                _fixture_identity(),
+                "alpha-bravo-charlie-delta-echo-foxtrot",
+            )
+            self._dialog = dialog
+            self._wait_until(
+                lambda: (not dialog.is_busy) and dialog.passphrase_label.text() != ""
+            )
+            dialog.copy_passphrase_button.click()
+            if clipboard.text() != dialog.passphrase:
+                raise AssertionError("copy did not place the recovery phrase")
+            dialog.reject()
+            self._assert_clipboard_empty(clipboard)
+            if (
+                dialog.passphrase is not None
+                or dialog.passphrase_label.text() != ""
+            ):
+                raise AssertionError("reject left the recovery phrase in the dialog")
+
+            dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                self.gui.common,
+                _fixture_identity(),
+                "alpha-bravo-charlie-delta-echo-foxtrot",
+            )
+            self._dialog = dialog
+            self._wait_until(
+                lambda: (not dialog.is_busy) and dialog.passphrase_label.text() != ""
+            )
+            dialog.copy_passphrase_button.click()
+            previous = dialog.passphrase
+            generation = dialog.generation
+            dialog.regenerate_button.click()
+            if clipboard.text() == previous or clipboard.text() != "":
+                raise AssertionError(
+                    "regenerate left the previous recovery phrase on the clipboard"
+                )
+            self._wait_until(
+                lambda: dialog.generation > generation and not dialog.is_busy
+            )
+            if clipboard.text() == previous or clipboard.text() != "":
+                raise AssertionError(
+                    "clipboard held the previous recovery phrase after regenerate"
+                )
+            if dialog.passphrase == previous:
+                raise AssertionError("regenerate did not replace the recovery phrase")
+            dialog.reject()
+
+            dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                self.gui.common,
+                _fixture_identity(),
+                "alpha-bravo-charlie-delta-echo-foxtrot",
+            )
+            self._dialog = dialog
+            self._wait_until(
+                lambda: (not dialog.is_busy) and dialog.passphrase_label.text() != ""
+            )
+            clipboard.setText("unrelated-clipboard-text")
+            dialog.reject()
+            if clipboard.text() != "unrelated-clipboard-text":
+                raise AssertionError("unrelated clipboard text was replaced")
+
+            dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                self.gui.common,
+                _fixture_identity(),
+                "alpha-bravo-charlie-delta-echo-foxtrot",
+            )
+            self._dialog = dialog
+            self._wait_until(
+                lambda: (not dialog.is_busy) and dialog.passphrase_label.text() != ""
+            )
+            dialog.copy_passphrase_button.click()
+            dialog.copy_encrypted_button.click()
+            if clipboard.text() != dialog.qr_text:
+                raise AssertionError("copy encrypted text did not update the clipboard")
+            dialog.close_button.click()
+            if clipboard.text() != "{}":
+                raise AssertionError("close cleared clipboard text that was not the phrase")
+
+            dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                self.gui.common,
+                _fixture_identity(),
+                "alpha-bravo-charlie-delta-echo-foxtrot",
+            )
+            self._dialog = dialog
+            self._wait_until(
+                lambda: (not dialog.is_busy) and dialog.passphrase_label.text() != ""
+            )
+            dialog.copy_passphrase_button.click()
+            phrase = dialog.passphrase
+
+            class _ClipboardDouble(object):
+                def __init__(self):
+                    self.values = {
+                        QtGui.QClipboard.Mode.Clipboard: "unrelated-clipboard-text",
+                        QtGui.QClipboard.Mode.Selection: phrase,
+                    }
+
+                def supportsSelection(self):
+                    return True
+
+                def text(self, mode=QtGui.QClipboard.Mode.Clipboard):
+                    return self.values.get(mode, "")
+
+                def clear(self, mode=QtGui.QClipboard.Mode.Clipboard):
+                    self.values[mode] = ""
+
+            double = _ClipboardDouble()
+            with mock.patch.object(
+                QtWidgets.QApplication, "clipboard", return_value=double
+            ):
+                dialog.deleteLater()
+                QtCore.QCoreApplication.sendPostedEvents(
+                    None, QtCore.QEvent.Type.DeferredDelete
+                )
+            if isValid(dialog):
+                raise AssertionError("dialog was not destroyed")
+            if double.text(QtGui.QClipboard.Mode.Selection) != "":
+                raise AssertionError(
+                    "destroy left the recovery phrase on the selection clipboard"
+                )
+            if double.text() != "unrelated-clipboard-text":
+                raise AssertionError(
+                    "destroy cleared clipboard text that was not the phrase"
+                )
+            self._dialog = None
+            clipboard.clear()
+            self.gui.qtapp.processEvents()
+
+    def test_save_qr_image_is_created_mode_0600(self):
+        """The QR PNG is mode 0600 from creation, including under umask 0."""
+
+        def fast(identity, passphrase):
+            return "{}"
+
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "qr.png")
+        old_umask = os.umask(0)
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o666)
+            os.close(descriptor)
+            with mock.patch.object(identity_backup_dialog, "encrypt_identity", fast):
+                dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                    self.gui.common,
+                    _fixture_identity(),
+                    "alpha-bravo-charlie-delta-echo-foxtrot",
+                )
+                self._dialog = dialog
+                self._wait_until(
+                    lambda: (not dialog.is_busy)
+                    and dialog.pending_bytes is not None
+                    and dialog._qr_source is not None
+                )
+                chmod_other_bits = []
+                real_chmod = os.chmod
+
+                def spy_chmod(filename, mode):
+                    if os.path.abspath(filename) == os.path.abspath(path):
+                        if os.path.lexists(filename):
+                            chmod_other_bits.append(
+                                os.lstat(filename).st_mode & 0o077
+                            )
+                    return real_chmod(filename, mode)
+
+                with mock.patch.object(os, "chmod", spy_chmod):
+                    with mock.patch.object(
+                        QtWidgets.QFileDialog,
+                        "getSaveFileName",
+                        return_value=(path, "png"),
+                    ):
+                        dialog.save_qr_button.click()
+            mode = stat.S_IMODE(os.lstat(path).st_mode)
+            if mode != 0o600:
+                raise AssertionError(
+                    "QR png mode was {0}, expected 0600".format(oct(mode))
+                )
+            for bits in chmod_other_bits:
+                if bits != 0:
+                    raise AssertionError(
+                        "QR png was group or world readable before chmod"
+                    )
+            buffer = QtCore.QBuffer()
+            buffer.open(QtCore.QIODevice.OpenModeFlag.WriteOnly)
+            if not dialog._qr_source.save(buffer, "PNG"):
+                raise AssertionError("pixmap PNG encode failed")
+            with open(path, "rb") as handle:
+                file_bytes = handle.read()
+            if file_bytes != bytes(buffer.data()):
+                raise AssertionError("QR png bytes differed from the pixmap")
+            if not file_bytes.startswith(b"\x89PNG"):
+                raise AssertionError("saved QR image was not a PNG")
+            names = sorted(os.listdir(directory))
+            if names != ["qr.png"]:
+                raise AssertionError("QR save left a temporary file behind")
+        finally:
+            os.umask(old_umask)
+            for name in os.listdir(directory):
+                try:
+                    os.remove(os.path.join(directory, name))
+                except OSError:
+                    pass
+            os.rmdir(directory)
+
+    def test_save_qr_image_writes_png_on_windows_without_fchmod(self):
+        """
+        Windows has no os.fchmod and st_mode can report 0666.
+
+        Save QR still writes the PNG through the temp file and os.replace.
+        """
+
+        def fast(identity, passphrase):
+            return "{}"
+
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "qr.png")
+        module_os = identity_backup_dialog.os
+        real_name = module_os.name
+        real_fstat = module_os.fstat
+        real_fchmod = getattr(module_os, "fchmod", None)
+        removed_fchmod = False
+
+        def windows_fstat(fd):
+            info = real_fstat(fd)
+            values = list(info)
+            values[0] = (values[0] & ~0o777) | 0o666
+            return os.stat_result(values)
+
+        try:
+            with mock.patch.object(identity_backup_dialog, "encrypt_identity", fast):
+                dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                    self.gui.common,
+                    _fixture_identity(),
+                    "alpha-bravo-charlie-delta-echo-foxtrot",
+                )
+                self._dialog = dialog
+                self._wait_until(
+                    lambda: (not dialog.is_busy)
+                    and dialog.pending_bytes is not None
+                    and dialog._qr_source is not None
+                )
+                module_os.name = "nt"
+                if hasattr(module_os, "fchmod"):
+                    del module_os.fchmod
+                    removed_fchmod = True
+                module_os.fstat = windows_fstat
+                with mock.patch.object(
+                    QtWidgets.QMessageBox,
+                    "exec",
+                    return_value=QtWidgets.QMessageBox.StandardButton.Ok,
+                ):
+                    with mock.patch.object(
+                        QtWidgets.QFileDialog,
+                        "getSaveFileName",
+                        return_value=(path, "png"),
+                    ):
+                        dialog.save_qr_button.click()
+            if not os.path.isfile(path):
+                raise AssertionError("Windows QR save did not write a file")
+            with open(path, "rb") as handle:
+                file_bytes = handle.read()
+            if not file_bytes.startswith(b"\x89PNG"):
+                raise AssertionError("Windows QR save was not a PNG")
+            buffer = QtCore.QBuffer()
+            buffer.open(QtCore.QIODevice.OpenModeFlag.WriteOnly)
+            if not dialog._qr_source.save(buffer, "PNG"):
+                raise AssertionError("pixmap PNG encode failed")
+            if file_bytes != bytes(buffer.data()):
+                raise AssertionError("Windows QR png bytes differed from the pixmap")
+            names = sorted(os.listdir(directory))
+            if names != ["qr.png"]:
+                raise AssertionError("Windows QR save left a temporary file behind")
+        finally:
+            module_os.name = real_name
+            module_os.fstat = real_fstat
+            if removed_fchmod and real_fchmod is not None:
+                module_os.fchmod = real_fchmod
+            for name in os.listdir(directory):
+                try:
+                    os.remove(os.path.join(directory, name))
+                except OSError:
+                    pass
+            os.rmdir(directory)
 
     def test_reject_clears_import_passphrase(self):
         dialog = ImportIdentityDialog(self.gui.common, self.gui.tabs)

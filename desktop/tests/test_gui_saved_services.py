@@ -736,6 +736,209 @@ class SavedServicesCase(GuiBaseTest):
         if "w4-fsync-eio" in blobs:
             raise AssertionError("fsync error text was logged")
 
+    def run_damaged_record_can_be_deleted(self):
+        """
+        A truncated record and a symlink record are listed as damaged text
+        rows. Only Delete is enabled. Delete unlinks the record id and does
+        not follow a symlink.
+        """
+        good = _sibling_identity()
+        damaged = _sibling_identity()
+        linked = _sibling_identity()
+        secrets = _secrets_of(good, damaged, linked)
+        archive = SavedServices(self.gui.common, self.gui.common.settings)
+        archive.add(good, "w6-good")
+        archive.add(damaged, "w6-damaged")
+        archive.add(linked, "w6-linked")
+        data_dir = self.gui.common.build_data_dir()
+        directory = os.path.join(data_dir, "saved_services")
+        damaged_path = os.path.join(directory, damaged["service_id"] + ".json")
+        link_path = os.path.join(directory, linked["service_id"] + ".json")
+        good_path = os.path.join(directory, good["service_id"] + ".json")
+        with open(damaged_path, "rb") as handle:
+            raw = handle.read()
+        key = damaged["private_key"].encode("ascii")
+        marker = b'"private_key":"' + key + b'"'
+        if marker not in raw:
+            raise AssertionError("could not locate the key field to truncate")
+        truncated = raw[: raw.find(marker) + len(marker)]
+        with open(damaged_path, "wb") as handle:
+            handle.write(truncated)
+        with open(link_path, "rb") as handle:
+            link_bytes = handle.read()
+        holder = tempfile.TemporaryDirectory()
+        outside = os.path.join(holder.name, "outside-target.json")
+        try:
+            with open(outside, "wb") as handle:
+                handle.write(link_bytes)
+            os.remove(link_path)
+            os.symlink(outside, link_path)
+            listed = [
+                item["service_id"]
+                for item in SavedServices(
+                    self.gui.common, self.gui.common.settings
+                ).list()
+            ]
+            if listed != [good["service_id"]]:
+                raise AssertionError("list() changed which valid records it returns")
+
+            answers = {"confirm": QtWidgets.QMessageBox.StandardButton.No}
+            alerts = []
+
+            def exec_answer(box, *args, **kwargs):
+                alerts.append(box.text())
+                yes = QtWidgets.QMessageBox.StandardButton.Yes
+                if box.standardButtons() & yes:
+                    return answers["confirm"]
+                return QtWidgets.QMessageBox.StandardButton.Ok
+
+            persistent_tabs = self._persistent_tabs()
+            tabs_before = self.gui.tabs.count()
+            with mock.patch.object(QtWidgets.QMessageBox, "exec", exec_answer):
+                dialog = SavedServicesDialog(self.gui.common, self.gui.tabs)
+                self._dialog = dialog
+                if dialog.table.rowCount() != 3:
+                    raise AssertionError(
+                        "damaged records were omitted from the manager"
+                    )
+                if dialog.empty_label.isVisible():
+                    raise AssertionError("damaged records showed the empty state")
+                good_row = self._select(dialog, good["service_id"])
+                if dialog.table.item(good_row, 0).text() != "w6-good":
+                    raise AssertionError("valid row label changed")
+                if not (
+                    dialog.open_button.isEnabled()
+                    and dialog.export_button.isEnabled()
+                    and dialog.rename_button.isEnabled()
+                    and dialog.delete_button.isEnabled()
+                ):
+                    raise AssertionError("valid row did not enable every action")
+
+                damaged_row = self._select(dialog, damaged["service_id"])
+                damaged_label = strings._("gui_saved_services_damaged_record")
+                if dialog.table.item(damaged_row, 0).text() != damaged_label:
+                    raise AssertionError("damaged row was not labeled in text")
+                if damaged_label != "Damaged record":
+                    raise AssertionError("damaged row label string changed")
+                self._assert_no_secret_text(dialog, damaged_row, secrets)
+                if not dialog.detail_label.text().startswith(damaged_label):
+                    raise AssertionError("details did not name the damaged record")
+                if (
+                    strings._("gui_saved_services_damaged_details")
+                    not in dialog.detail_label.text()
+                ):
+                    raise AssertionError("details did not explain the damaged record")
+                if dialog.detail_onion.text() != damaged["service_id"]:
+                    raise AssertionError("damaged details omitted the service id")
+                for secret in secrets:
+                    if secret and secret in dialog.detail_label.text():
+                        raise AssertionError("damaged details included key material")
+                    if secret and secret in dialog.detail_onion.text():
+                        raise AssertionError("damaged details included key material")
+                if dialog.open_button.isEnabled() or dialog.export_button.isEnabled():
+                    raise AssertionError("damaged row enabled open or export")
+                if dialog.rename_button.isEnabled() or not dialog.delete_button.isEnabled():
+                    raise AssertionError("damaged row did not leave only delete enabled")
+                dialog.open_selected()
+                dialog.export_selected()
+                dialog.rename_selected()
+                self.gui.qtapp.processEvents()
+                if self.gui.tabs.count() != tabs_before:
+                    raise AssertionError("damaged open created a tab")
+                if dialog.export_dialog is not None:
+                    raise AssertionError("damaged export opened a backup dialog")
+                with open(damaged_path, "rb") as handle:
+                    if handle.read() != truncated:
+                        raise AssertionError("disabled actions changed the damaged file")
+
+                self._select(dialog, damaged["service_id"])
+                dialog.delete_button.click()
+                self.gui.qtapp.processEvents()
+                if strings._("gui_saved_services_delete_confirm") not in alerts:
+                    raise AssertionError("delete did not ask for confirmation")
+                if not os.path.lexists(damaged_path):
+                    raise AssertionError("cancelling delete removed the damaged file")
+
+                answers["confirm"] = QtWidgets.QMessageBox.StandardButton.Yes
+                self._select(dialog, damaged["service_id"])
+                dialog.delete_button.click()
+                self.gui.qtapp.processEvents()
+                if os.path.lexists(damaged_path):
+                    raise AssertionError("delete left the damaged file in place")
+                self.gui.common.settings.load()
+                saved_ids = list(self.gui.common.settings.get("saved_services"))
+                if damaged["service_id"] in saved_ids:
+                    raise AssertionError("delete left the damaged id in settings")
+                if good["service_id"] not in saved_ids:
+                    raise AssertionError("delete removed the valid saved service")
+                if not os.path.islink(link_path):
+                    raise AssertionError("delete followed or replaced the symlink")
+                with open(outside, "rb") as handle:
+                    if handle.read() != link_bytes:
+                        raise AssertionError("symlink target changed")
+
+                link_row = self._select(dialog, linked["service_id"])
+                if dialog.table.item(link_row, 0).text() != damaged_label:
+                    raise AssertionError("symlink record was not labeled as damaged")
+                self._assert_no_secret_text(dialog, link_row, secrets)
+                if dialog.open_button.isEnabled() or dialog.rename_button.isEnabled():
+                    raise AssertionError("symlink row enabled open or rename")
+                dialog.delete_button.click()
+                self.gui.qtapp.processEvents()
+                if os.path.lexists(link_path):
+                    raise AssertionError("delete left the symlink record in place")
+                if not os.path.isfile(outside):
+                    raise AssertionError("delete removed the symlink target")
+                with open(outside, "rb") as handle:
+                    if handle.read() != link_bytes:
+                        raise AssertionError("symlink target bytes changed")
+                self.gui.common.settings.load()
+                saved_ids = list(self.gui.common.settings.get("saved_services"))
+                if linked["service_id"] in saved_ids:
+                    raise AssertionError("delete left the symlink id in settings")
+                if saved_ids != [good["service_id"]]:
+                    raise AssertionError("settings ids were not left as the valid record")
+                if not os.path.isfile(good_path):
+                    raise AssertionError("delete removed the valid record file")
+                reloaded = SavedServices(
+                    self.gui.common, self.gui.common.settings
+                ).get(good["service_id"])
+                if reloaded["label"] != "w6-good":
+                    raise AssertionError("valid record label changed")
+                if reloaded["private_key"] != good["private_key"]:
+                    raise AssertionError("valid record key changed")
+                if self._persistent_tabs() != persistent_tabs:
+                    raise AssertionError("delete changed persistent tabs")
+                again = [
+                    item["service_id"]
+                    for item in SavedServices(
+                        self.gui.common, self.gui.common.settings
+                    ).list()
+                ]
+                if again != [good["service_id"]]:
+                    raise AssertionError("list() no longer returns the valid record")
+        finally:
+            holder.cleanup()
+            if os.path.islink(link_path):
+                os.unlink(link_path)
+            captured = self.capsys.readouterr()
+            blob = self.caplog.text + captured.out + captured.err
+            for secret in secrets:
+                if secret and secret in blob:
+                    raise AssertionError("private key appeared in test output")
+
+    def _assert_no_secret_text(self, dialog, row, secrets):
+        for column in range(dialog.table.columnCount()):
+            cell = dialog.table.item(row, column)
+            if cell is None:
+                continue
+            for secret in secrets:
+                if secret and secret in cell.text():
+                    raise AssertionError("record key text was shown in the manager")
+                tooltip = cell._item.toolTip(column)
+                if secret and tooltip and secret in tooltip:
+                    raise AssertionError("record key text was shown in a tooltip")
+
     def run_empty_manager(self):
         dialog = SavedServicesDialog(self.gui.common, self.gui.tabs)
         self._dialog = dialog
@@ -798,6 +1001,19 @@ def test_symlinked_archive_directory_shows_list_error(
     case.setUp()
     try:
         case.run_symlinked_archive_list_error()
+    finally:
+        case.tearDown()
+
+
+def test_damaged_saved_service_row_can_be_deleted(
+    saved_services_case, caplog, capsys
+):
+    case = saved_services_case("run_damaged_record_can_be_deleted")
+    case.caplog = caplog
+    case.capsys = capsys
+    case.setUp()
+    try:
+        case.run_damaged_record_can_be_deleted()
     finally:
         case.tearDown()
 
