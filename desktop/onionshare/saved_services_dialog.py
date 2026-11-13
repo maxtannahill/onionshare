@@ -195,17 +195,18 @@ class SavedServicesDialog(QtWidgets.QDialog):
         self.import_dialog.exec()
         self.reload()
 
-    def shutdown_identity_import(self):
+    def shutdown_identity_import(self, abandon=False):
         """
         Wait out an in-progress import decrypt before this dialog is destroyed.
 
         Returns False when the worker is still running after the timed wait.
+        A user close leaves ``abandon`` false. Quit passes true.
         """
         dialog = self.import_dialog
         if dialog is None:
             return True
         try:
-            return dialog.shutdown_decrypt_thread()
+            return dialog.shutdown_decrypt_thread(abandon=abandon)
         except RuntimeError:
             return True
 

@@ -1,4 +1,5 @@
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -452,10 +453,7 @@ class TestSavedServices:
         os.symlink(outside, path)
         with pytest.raises(saved_services.SavedServicesError, match="symlink"):
             store.get(identity["service_id"])
-        with pytest.raises(saved_services.SavedServicesError, match="symlink"):
-            store.list()
-        with pytest.raises(saved_services.SavedServicesError, match="symlink"):
-            store.delete(identity["service_id"])
+        assert store.list() == []
         with pytest.raises(saved_services.SavedServicesError, match="symlink"):
             store.rename(identity["service_id"], "other")
         assert os.path.islink(path)
@@ -472,8 +470,7 @@ class TestSavedServices:
             handle.write(duplicated)
         with pytest.raises(saved_services.SavedServicesError, match="duplicate"):
             store.get(identity["service_id"])
-        with pytest.raises(saved_services.SavedServicesError, match="duplicate"):
-            store.list()
+        assert store.list() == []
         assert _read(path).decode("utf-8") == duplicated
 
     def test_corrupted_record_raises_and_is_kept(self, store):
@@ -485,8 +482,7 @@ class TestSavedServices:
             handle.write(blob)
         with pytest.raises(saved_services.SavedServicesError, match="corrupt"):
             store.get(identity["service_id"])
-        with pytest.raises(saved_services.SavedServicesError, match="corrupt"):
-            store.list()
+        assert store.list() == []
         assert _read(path) == blob
 
         nan = (
@@ -704,3 +700,123 @@ class TestSavedServices:
             store.get(identity["service_id"])
         assert caught.value.__cause__ is None
         assert _read(path) == blob
+
+    def test_bad_records_do_not_hide_good_ones_and_delete_clears_them(
+        self, store, tmp_path
+    ):
+        good = _identity(public=True)
+        truncated = _identity(public=True)
+        linked = _identity(public=True)
+        store.add(good, "good", saved_at=_SAVED_AT)
+        store.add(truncated, "truncated", saved_at=_SAVED_AT)
+        store.add(linked, "linked", saved_at=_SAVED_AT)
+        good_record = store.get(good["service_id"])
+
+        trunc_path = _record_path(store, truncated["service_id"])
+        with open(trunc_path, "wb") as handle:
+            handle.write(b"{")
+
+        link_path = _record_path(store, linked["service_id"])
+        payload = _read(link_path)
+        outside = tmp_path / "outside-target.json"
+        outside.write_bytes(payload)
+        os.remove(link_path)
+        os.symlink(outside, link_path)
+
+        listed = store.list()
+        assert [item["service_id"] for item in listed] == [good["service_id"]]
+        assert listed[0] == good_record
+        assert _read(trunc_path) == b"{"
+        assert os.path.islink(link_path)
+        assert _read(outside) == payload
+
+        store.delete(truncated["service_id"])
+        assert not os.path.lexists(trunc_path)
+        store.delete(linked["service_id"])
+        assert not os.path.lexists(link_path)
+        assert outside.is_file()
+        assert _read(outside) == payload
+        fresh = _reload(store)
+        assert fresh.get("saved_services") == [good["service_id"]]
+        again = store.list()
+        assert [item["service_id"] for item in again] == [good["service_id"]]
+        assert again[0]["private_key"] == good["private_key"]
+
+    def test_post_commit_chmod_and_fsync_still_update_settings(
+        self, store, monkeypatch
+    ):
+        sibling = _identity(public=True)
+        identity = _identity(public=True)
+        store.add(sibling, "sibling", saved_at=_SAVED_AT)
+        real_chmod = os.chmod
+
+        def fail_json_chmod(path, mode):
+            if str(path).endswith(".json"):
+                raise OSError(errno.EPERM, "chmod failed")
+            return real_chmod(path, mode)
+
+        def fail_fsync(_directory):
+            raise OSError(errno.EIO, "fsync failed")
+
+        monkeypatch.setattr(saved_services.os, "chmod", fail_json_chmod)
+        monkeypatch.setattr(saved_services, "_fsync_directory", fail_fsync)
+        with pytest.raises(OSError):
+            store.add(identity, "label", saved_at=_SAVED_AT)
+        path = _record_path(store, identity["service_id"])
+        archive = os.path.dirname(path)
+        assert not any(name.startswith(".tmp-") for name in os.listdir(archive))
+        assert stat.S_IMODE(os.lstat(path).st_mode) == 0o600
+        fresh = _reload(store)
+        assert fresh.get("saved_services") == [
+            sibling["service_id"],
+            identity["service_id"],
+        ]
+        listed = store.list()
+        assert [item["service_id"] for item in listed] == [
+            sibling["service_id"],
+            identity["service_id"],
+        ]
+        assert listed[1]["label"] == "label"
+
+        with pytest.raises(OSError):
+            store.delete(identity["service_id"])
+        assert not os.path.lexists(path)
+        assert not any(name.startswith(".tmp-") for name in os.listdir(archive))
+        fresh = _reload(store)
+        assert fresh.get("saved_services") == [sibling["service_id"]]
+        assert [item["service_id"] for item in store.list()] == [
+            sibling["service_id"]
+        ]
+
+    def test_interleaved_adds_keep_ids_and_newer_persistent_tabs(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        _common = common.Common()
+        left_settings = settings.Settings(_common)
+        left_settings.load()
+        left_settings.set("persistent_tabs", ["keep-me"])
+        left_settings.save()
+        right_settings = settings.Settings(_common)
+        right_settings.load()
+        left = saved_services.SavedServices(_common, left_settings)
+        right = saved_services.SavedServices(_common, right_settings)
+        first = _identity(public=True)
+        second = _identity(public=True)
+        left.add(first, "a", saved_at=_SAVED_AT)
+        external = settings.Settings(_common)
+        external.load()
+        external.set("persistent_tabs", ["keep-me", "new-tab"])
+        external.save()
+        right.add(second, "b", saved_at=_SAVED_AT)
+        fresh = _reload(right)
+        assert fresh.get("saved_services") == [
+            first["service_id"],
+            second["service_id"],
+        ]
+        assert fresh.get("persistent_tabs") == ["keep-me", "new-tab"]
+        assert right_settings.get("saved_services") == [
+            first["service_id"],
+            second["service_id"],
+        ]
+        assert right_settings.get("persistent_tabs") == ["keep-me", "new-tab"]

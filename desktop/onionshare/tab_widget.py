@@ -104,7 +104,7 @@ class TabWidget(QtWidgets.QTabWidget):
         for tab_id in self.tabs:
             tab = self.tabs[tab_id]
             if type(tab) is SettingsParentTab:
-                self._shutdown_settings_import(tab)
+                self._shutdown_settings_import(tab, abandon=True)
 
         # Clean up each tab
         for tab_id in self.tabs:
@@ -531,17 +531,19 @@ class TabWidget(QtWidgets.QTabWidget):
             else:
                 self.common.log("TabWidget", "user does not want to close the tab")
 
-    def _shutdown_settings_import(self, settings_parent):
+    def _shutdown_settings_import(self, settings_parent, abandon=False):
         """
         Wait out an identity-import decrypt before a settings tab is destroyed.
 
         Returns False when the worker is still running after the timed wait.
+        Quit passes ``abandon`` so the worker stays disconnected. A user close
+        leaves it false and keeps the settings tab open.
         """
         shutdown = getattr(settings_parent, "shutdown_identity_import", None)
         if shutdown is None:
             return True
         try:
-            return shutdown()
+            return shutdown(abandon)
         except RuntimeError:
             return True
 

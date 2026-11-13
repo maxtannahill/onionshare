@@ -759,9 +759,12 @@ class Tab(QtWidgets.QWidget):
         else:
             return None
 
-    def _finish_identity_backup(self):
+    def _finish_identity_backup(self, abandon=False):
         """
         Finish an in-progress identity export before this tab is destroyed.
+
+        ``abandon`` is for quit. A user close leaves it false so a still-running
+        worker keeps the tab open and still receives the result.
         """
         mode = self.get_mode()
         if mode is None:
@@ -770,7 +773,7 @@ class Tab(QtWidgets.QWidget):
         shutdown = getattr(widget, "shutdown_identity_backup", None)
         if shutdown is None:
             return True
-        return shutdown()
+        return shutdown(abandon)
 
     def close_tab(self):
         self.common.log("Tab", "close_tab")
@@ -812,7 +815,7 @@ class Tab(QtWidgets.QWidget):
 
     def cleanup(self):
         self.common.log("Tab", "cleanup", f"tab_id={self.tab_id}")
-        self._finish_identity_backup()
+        self._finish_identity_backup(abandon=True)
         if self.get_mode():
             if self.get_mode().is_server:
                 if self.get_mode().web_thread:
