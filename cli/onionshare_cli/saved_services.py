@@ -25,9 +25,7 @@ is mode 0o600, but the onion private key and client-auth keys inside a
 record are plaintext. This archive is not an encrypted backup.
 """
 
-import base64
 import errno
-import hashlib
 import json
 import os
 import re
@@ -36,10 +34,7 @@ import tempfile
 import unicodedata
 from datetime import datetime, timezone
 
-import nacl.bindings
-import nacl.public
-from nacl.exceptions import UnavailableError
-
+from .identity_backup import IdentityBackupError, validate_identity
 from .settings import Settings
 
 
@@ -61,16 +56,11 @@ _IDENTITY_KEYS = (
     "public",
 )
 _RECORD_KEYS = _IDENTITY_KEYS + ("label", "saved_at")
-_MODES = {"share", "receive", "website", "chat"}
 _SERVICE_ID_RE = re.compile(r"^[a-z2-7]{56}$")
-_PRIVATE_KEY_RE = re.compile(r"^[A-Za-z0-9+/]{86}==$")
-_CLIENT_AUTH_RE = re.compile(r"^[A-Z2-7]{52}$")
 _SAVED_AT_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T"
     r"[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$"
 )
-_ONION_CHECKSUM_PREFIX = b".onion checksum"
-_ONION_VERSION = b"\x03"
 
 
 def _canonical_bytes(record):
@@ -120,119 +110,24 @@ def _utc_now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _decode_private_key(value):
-    if type(value) is not str or _PRIVATE_KEY_RE.fullmatch(value) is None:
-        raise SavedServicesError("invalid private_key")
-    if value.startswith("ED25519-V3:") or "ED25519-V3:" in value:
-        raise SavedServicesError("invalid private_key")
-    try:
-        raw = base64.b64decode(value)
-    except Exception:
-        raise SavedServicesError("invalid private_key")
-    canonical = base64.b64encode(raw).decode("ascii")
-    if len(raw) != 64 or canonical != value:
-        raise SavedServicesError("invalid private_key")
-    return raw
-
-
-def _decode_client_auth(value):
-    if type(value) is not str or _CLIENT_AUTH_RE.fullmatch(value) is None:
-        raise SavedServicesError("invalid client-auth key")
-    try:
-        raw = base64.b32decode(value + "====", casefold=False)
-    except Exception:
-        raise SavedServicesError("invalid client-auth key")
-    canonical = base64.b32encode(raw).decode("ascii")
-    if canonical.endswith("===="):
-        canonical = canonical[:-4]
-    if len(raw) != 32 or canonical != value:
-        raise SavedServicesError("invalid client-auth key")
-    return raw
-
-
-def _service_id_for_scalar(scalar):
-    """
-    Tor v3 address of an ed25519 public key.
-
-    The ED25519-V3 blob OnionShare stores is the secret scalar concatenated
-    with the PRF secret, not the seed and not the public key. PyNaCl can
-    recompute the public key from that scalar.
-    """
-    try:
-        public_key = nacl.bindings.crypto_scalarmult_ed25519_base_noclamp(scalar)
-    except UnavailableError:
-        raise SavedServicesError(
-            "cannot validate private_key with this libsodium build"
-        )
-    except Exception:
-        raise SavedServicesError("invalid private_key")
-    if type(public_key) is not bytes or len(public_key) != 32:
-        raise SavedServicesError("invalid private_key")
-    checksum = hashlib.sha3_256(
-        _ONION_CHECKSUM_PREFIX + public_key + _ONION_VERSION
-    ).digest()[:2]
-    raw_address = public_key + checksum + _ONION_VERSION
-    return base64.b32encode(raw_address).decode("ascii").lower()
-
-
 def _validate_identity(fields):
     """
-    Validate the six identity fields.
+    Validate a six-key projection with identity_backup.validate_identity.
 
-    This is the archive's private copy of the identity rules. Callers must
-    already have decided whether extra keys are allowed; this function only
-    reads the six identity fields.
+    ``label`` and ``saved_at`` are not passed through: they would look like
+    extra keys. Exact key sets for an on-disk record and for ``build_record``
+    input are checked by those callers. IdentityBackupError becomes
+    SavedServicesError so archive callers do not see the envelope error.
     """
-    for key in _IDENTITY_KEYS:
-        if key not in fields:
-            raise SavedServicesError(
-                "identity must contain exactly the six identity keys"
-            )
-
-    mode = fields["mode"]
-    if type(mode) is not str or mode not in _MODES:
-        raise SavedServicesError("invalid mode")
-
-    service_id = fields["service_id"]
-    if type(service_id) is not str or _SERVICE_ID_RE.fullmatch(service_id) is None:
-        raise SavedServicesError("invalid service_id")
-
-    raw_private = _decode_private_key(fields["private_key"])
-    derived_id = _service_id_for_scalar(raw_private[:32])
-    if derived_id != service_id:
-        raise SavedServicesError("service_id does not match private_key")
-
-    public = fields["public"]
-    if type(public) is not bool:
-        raise SavedServicesError("public must be a boolean")
-
-    priv = fields["client_auth_priv_key"]
-    pub = fields["client_auth_pub_key"]
-    if priv is None and pub is None:
-        if public is False:
-            raise SavedServicesError("a private service requires client-auth keys")
-    elif priv is None or pub is None:
+    if type(fields) is not dict or any(key not in fields for key in _IDENTITY_KEYS):
         raise SavedServicesError(
-            "client-auth keys must both be null or both be valid"
+            "identity must contain exactly the six identity keys"
         )
-    else:
-        priv_raw = _decode_client_auth(priv)
-        pub_raw = _decode_client_auth(pub)
-        try:
-            derived_pub = bytes(nacl.public.PrivateKey(priv_raw).public_key)
-        except Exception:
-            raise SavedServicesError("invalid client-auth key")
-        if derived_pub != pub_raw:
-            raise SavedServicesError("client-auth key pair does not match")
-
-    return {
-        "mode": mode,
-        "service_id": service_id,
-        "private_key": fields["private_key"],
-        "client_auth_priv_key": priv,
-        "client_auth_pub_key": pub,
-        "public": public,
-    }
+    projection = {key: fields[key] for key in _IDENTITY_KEYS}
+    try:
+        return validate_identity(projection)
+    except IdentityBackupError:
+        raise SavedServicesError("invalid identity") from None
 
 
 def _parse_record(text):
