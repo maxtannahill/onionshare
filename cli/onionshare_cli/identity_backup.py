@@ -360,8 +360,18 @@ def decrypt_identity(text, passphrase):
     """Decrypt an envelope and return the validated identity."""
     if type(text) is not str or type(passphrase) is not str:
         _reject()
-    if len(text) > _MAX_INPUT_BYTES or len(text.encode("utf-8")) > _MAX_INPUT_BYTES:
-        _reject()
+    # UTF-8 length is measured inside the generic handler. A lone surrogate
+    # cannot be encoded and must still be IdentityBackupError, before parse.
+    try:
+        if (
+            len(text) > _MAX_INPUT_BYTES
+            or len(text.encode("utf-8")) > _MAX_INPUT_BYTES
+        ):
+            _reject()
+    except IdentityBackupError:
+        raise
+    except Exception:
+        raise IdentityBackupError() from None
     envelope = _parse_json_object(text)
     _reject_unpinned_envelope(envelope)
     salt = _decode_canonical_b64(envelope["salt"], exact_len=_SALT_BYTES)

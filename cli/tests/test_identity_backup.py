@@ -584,6 +584,20 @@ class TestEnvelopeParsing:
         _assert_generic(_expect_generic(lambda: decrypt_identity(b"{}", "pw")))
         _assert_generic(_expect_generic(lambda: decrypt_identity("{}", None)))
 
+    def test_lone_surrogate_is_a_generic_error(self, monkeypatch):
+        kdf_calls = _block_kdf(monkeypatch)
+        parses = {"n": 0}
+        real_loads = json.loads
+
+        def spy_loads(*args, **kwargs):
+            parses["n"] += 1
+            return real_loads(*args, **kwargs)
+
+        monkeypatch.setattr("onionshare_cli.identity_backup.json.loads", spy_loads)
+        _assert_generic(_expect_generic(lambda: decrypt_identity("\ud800", "pw")))
+        assert parses["n"] == 0
+        assert kdf_calls == []
+
     def test_decrypt_passes_pinned_kdf_arguments(self, monkeypatch):
         seen = {}
 
