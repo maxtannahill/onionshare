@@ -62,7 +62,7 @@ Saved Services
 
 From a Share, Receive, Website, or Chat tab, "Save to Saved Services…" keeps that onion identity on this computer.
 Open the list from the Settings tab with "Saved Services…".
-From there you can open a service, rename its label, delete it, or import a backup.
+From there you can open a service, export a backup, rename its label, delete it, or import a backup.
 
 **Saved Services stores onion service keys unencrypted on this computer.**
 Anyone who can read this computer's OnionShare data can read those private keys.

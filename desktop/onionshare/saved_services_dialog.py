@@ -277,7 +277,6 @@ class SavedServicesDialog(QtWidgets.QDialog):
         details_layout.setSpacing(12)
         details_layout.addWidget(self.details_heading)
         details_layout.addLayout(form)
-        details_layout.addSpacing(4)
         details_layout.addLayout(actions)
         details_layout.addStretch()
         self.details_widget = QtWidgets.QWidget()
