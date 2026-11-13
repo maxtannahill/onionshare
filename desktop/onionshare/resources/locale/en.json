@@ -309,6 +309,8 @@
     "gui_saved_services_delete_error": "Could not delete this saved service.",
     "gui_saved_services_invalid_label": "A saved service label must be 0–100 characters and must not contain control characters.",
     "gui_saved_services_import_button": "Import backup…",
+    "gui_saved_services_damaged_record": "Damaged record",
+    "gui_saved_services_damaged_details": "This saved service record is damaged or unreadable. It cannot be opened, exported, or renamed. Delete removes the leftover file from this computer.",
     "gui_identity_import_dialog_title": "Import identity backup",
     "gui_identity_import_instructions": "Choose a backup file or paste the backup text. Type the passphrase as one hyphen-joined string. OnionShare does not split it on hyphens. Leading and trailing whitespace around the passphrase is ignored.",
     "gui_identity_import_paste_radio": "Pasted text",
