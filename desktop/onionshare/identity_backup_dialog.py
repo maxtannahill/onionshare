@@ -278,15 +278,20 @@ def _write_exact_bytes(path, payload, *, private=False):
 
     The destination is not opened for writing, so a failure leaves any
     existing file byte-for-byte intact and removes the temp file. When
-    ``private`` is true, the temp file is mode 0600 before any payload byte
-    is written, and that inode is what ``os.replace`` puts at ``path``.
+    ``private`` is true on POSIX, the temp file is mode 0600 before any
+    payload byte is written, and that inode is what ``os.replace`` puts at
+    ``path``. Windows has no ``os.fchmod`` and may report mode 0666, so the
+    same temp-file replace is used there without a mode change or check.
     """
     directory = os.path.dirname(os.path.abspath(path)) or "."
     descriptor, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=directory)
     replaced = False
+    enforce_private_mode = (
+        private and os.name != "nt" and hasattr(os, "fchmod")
+    )
     try:
         try:
-            if private:
+            if enforce_private_mode:
                 os.fchmod(descriptor, 0o600)
                 if os.fstat(descriptor).st_mode & 0o077:
                     raise OSError("file mode is not private")

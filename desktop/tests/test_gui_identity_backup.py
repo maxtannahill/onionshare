@@ -1503,6 +1503,86 @@ class TestIdentityBackupGui(GuiBaseTest):
                     pass
             os.rmdir(directory)
 
+    def test_save_qr_image_writes_png_on_windows_without_fchmod(self):
+        """
+        Windows has no os.fchmod and st_mode can report 0666.
+
+        Save QR still writes the PNG through the temp file and os.replace.
+        """
+
+        def fast(identity, passphrase):
+            return "{}"
+
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "qr.png")
+        module_os = identity_backup_dialog.os
+        real_name = module_os.name
+        real_fstat = module_os.fstat
+        real_fchmod = getattr(module_os, "fchmod", None)
+        removed_fchmod = False
+
+        def windows_fstat(fd):
+            info = real_fstat(fd)
+            values = list(info)
+            values[0] = (values[0] & ~0o777) | 0o666
+            return os.stat_result(values)
+
+        try:
+            with mock.patch.object(identity_backup_dialog, "encrypt_identity", fast):
+                dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                    self.gui.common,
+                    _fixture_identity(),
+                    "alpha-bravo-charlie-delta-echo-foxtrot",
+                )
+                self._dialog = dialog
+                self._wait_until(
+                    lambda: (not dialog.is_busy)
+                    and dialog.pending_bytes is not None
+                    and dialog._qr_source is not None
+                )
+                module_os.name = "nt"
+                if hasattr(module_os, "fchmod"):
+                    del module_os.fchmod
+                    removed_fchmod = True
+                module_os.fstat = windows_fstat
+                with mock.patch.object(
+                    QtWidgets.QMessageBox,
+                    "exec",
+                    return_value=QtWidgets.QMessageBox.StandardButton.Ok,
+                ):
+                    with mock.patch.object(
+                        QtWidgets.QFileDialog,
+                        "getSaveFileName",
+                        return_value=(path, "png"),
+                    ):
+                        dialog.save_qr_button.click()
+            if not os.path.isfile(path):
+                raise AssertionError("Windows QR save did not write a file")
+            with open(path, "rb") as handle:
+                file_bytes = handle.read()
+            if not file_bytes.startswith(b"\x89PNG"):
+                raise AssertionError("Windows QR save was not a PNG")
+            buffer = QtCore.QBuffer()
+            buffer.open(QtCore.QIODevice.OpenModeFlag.WriteOnly)
+            if not dialog._qr_source.save(buffer, "PNG"):
+                raise AssertionError("pixmap PNG encode failed")
+            if file_bytes != bytes(buffer.data()):
+                raise AssertionError("Windows QR png bytes differed from the pixmap")
+            names = sorted(os.listdir(directory))
+            if names != ["qr.png"]:
+                raise AssertionError("Windows QR save left a temporary file behind")
+        finally:
+            module_os.name = real_name
+            module_os.fstat = real_fstat
+            if removed_fchmod and real_fchmod is not None:
+                module_os.fchmod = real_fchmod
+            for name in os.listdir(directory):
+                try:
+                    os.remove(os.path.join(directory, name))
+                except OSError:
+                    pass
+            os.rmdir(directory)
+
     def test_reject_clears_import_passphrase(self):
         dialog = ImportIdentityDialog(self.gui.common, self.gui.tabs)
         dialog.passphrase_edit.setText("alpha-bravo-charlie-delta-echo-foxtrot")
