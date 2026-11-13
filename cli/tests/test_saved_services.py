@@ -787,3 +787,36 @@ class TestSavedServices:
         assert [item["service_id"] for item in store.list()] == [
             sibling["service_id"]
         ]
+
+    def test_interleaved_adds_keep_ids_and_newer_persistent_tabs(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        _common = common.Common()
+        left_settings = settings.Settings(_common)
+        left_settings.load()
+        left_settings.set("persistent_tabs", ["keep-me"])
+        left_settings.save()
+        right_settings = settings.Settings(_common)
+        right_settings.load()
+        left = saved_services.SavedServices(_common, left_settings)
+        right = saved_services.SavedServices(_common, right_settings)
+        first = _identity(public=True)
+        second = _identity(public=True)
+        left.add(first, "a", saved_at=_SAVED_AT)
+        external = settings.Settings(_common)
+        external.load()
+        external.set("persistent_tabs", ["keep-me", "new-tab"])
+        external.save()
+        right.add(second, "b", saved_at=_SAVED_AT)
+        fresh = _reload(right)
+        assert fresh.get("saved_services") == [
+            first["service_id"],
+            second["service_id"],
+        ]
+        assert fresh.get("persistent_tabs") == ["keep-me", "new-tab"]
+        assert right_settings.get("saved_services") == [
+            first["service_id"],
+            second["service_id"],
+        ]
+        assert right_settings.get("persistent_tabs") == ["keep-me", "new-tab"]

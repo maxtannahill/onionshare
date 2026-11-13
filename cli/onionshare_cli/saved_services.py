@@ -244,10 +244,13 @@ class SavedServices(object):
         if (os.path.exists(path) or service_id in ids) and not replace:
             raise SavedServicesError("saved service already exists")
         post = self._durable_write(directory, path, _canonical_bytes(record))
-        if service_id not in ids:
-            ids.append(service_id)
-        self.settings.set("saved_services", ids)
-        self.settings.save()
+
+        def include(current):
+            if service_id not in current:
+                current.append(service_id)
+            return current
+
+        self._save_saved_ids(include)
         self.common.log("SavedServices", "add", service_id)
         if post is not None:
             raise post
@@ -307,9 +310,9 @@ class SavedServices(object):
             except OSError as exc:
                 post = exc
         if listed:
-            remaining = [item for item in ids if item != service_id]
-            self.settings.set("saved_services", remaining)
-            self.settings.save()
+            self._save_saved_ids(
+                lambda current: [item for item in current if item != service_id]
+            )
         self.common.log("SavedServices", "delete", service_id)
         if post is not None:
             raise post
@@ -328,11 +331,13 @@ class SavedServices(object):
         directory = self._archive_dir(create=True)
         path = self._record_path(directory, service_id)
         post = self._durable_write(directory, path, _canonical_bytes(updated))
-        ids = self._saved_id_list()
-        if service_id not in ids:
-            ids.append(service_id)
-        self.settings.set("saved_services", ids)
-        self.settings.save()
+
+        def include(current):
+            if service_id not in current:
+                current.append(service_id)
+            return current
+
+        self._save_saved_ids(include)
         self.common.log("SavedServices", "rename", service_id)
         if post is not None:
             raise post
@@ -350,6 +355,19 @@ class SavedServices(object):
                 "saved_services settings must be a list of strings"
             )
         return list(current)
+
+    def _save_saved_ids(self, mutate):
+        """
+        Reload ``onionshare.json``, change only ``saved_services``, and save.
+
+        The fresh document is what gets written, so a stale in-memory copy
+        cannot revert ``persistent_tabs`` or any other key. This object's
+        settings are updated to that copy plus the ``saved_services`` change.
+        """
+        self.settings.load()
+        updated = mutate(self._saved_id_list())
+        self.settings.set("saved_services", updated)
+        self.settings.save()
 
     def _archive_dir(self, create):
         data_dir = self.common.build_data_dir()
