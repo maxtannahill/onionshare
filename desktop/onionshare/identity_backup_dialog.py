@@ -18,6 +18,10 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
+import errno
+import os
+import tempfile
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from onionshare_cli.identity_backup import (
@@ -95,6 +99,78 @@ class EncryptIdentityThread(QtCore.QThread):
         self.success.emit(envelope)
 
 
+# One timed wait for the Argon2id worker. Interactive KDF is far shorter than
+# this; if it is still running afterwards the dialog stays open.
+_ENCRYPT_THREAD_WAIT_MS = 180000
+
+
+def _fsync_directory(directory):
+    """Fsync a directory when the platform supports it."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError:
+        return
+    try:
+        try:
+            os.fsync(descriptor)
+        except OSError as exc:
+            unsupported = {errno.EINVAL}
+            for name in ("ENOTSUP", "EOPNOTSUPP"):
+                value = getattr(errno, name, None)
+                if value is not None:
+                    unsupported.add(value)
+            if exc.errno not in unsupported:
+                raise
+    finally:
+        os.close(descriptor)
+
+
+def _write_exact_bytes(path, payload):
+    """
+    Replace ``path`` with ``payload`` via a temp file in the same directory.
+
+    The destination is not opened for writing, so a failure leaves any
+    existing file byte-for-byte intact and removes the temp file.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    descriptor, tmp_path = tempfile.mkstemp(prefix=".tmp-", dir=directory)
+    replaced = False
+    try:
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = None
+                written = handle.write(payload)
+                if written != len(payload):
+                    raise OSError("short write")
+                handle.flush()
+                os.fsync(handle.fileno())
+                if os.fstat(handle.fileno()).st_size != len(payload):
+                    raise OSError("short write")
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        os.replace(tmp_path, path)
+        replaced = True
+        _fsync_directory(directory)
+    except Exception:
+        if not replaced:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
+
+
+def _archive_failure_message(error):
+    """Map a SavedServicesError to UI text. The label and error text are not logged."""
+    if str(error) == "invalid label":
+        return strings._("gui_identity_backup_invalid_label")
+    return strings._("gui_identity_backup_archive_error")
+
+
 def _confirm(common, message, icon, buttons, accept_button):
     box = Alert(
         common,
@@ -137,7 +213,7 @@ def save_identity_to_saved_services(common, parent, identity):
         archive.add(identity, label, replace=False)
     except SavedServicesError as error:
         if str(error) != "saved service already exists":
-            Alert(common, strings._("gui_identity_backup_archive_error"))
+            Alert(common, _archive_failure_message(error))
             return False
         replace = _confirm(
             common,
@@ -152,8 +228,8 @@ def save_identity_to_saved_services(common, parent, identity):
             return False
         try:
             archive.add(identity, label, replace=True)
-        except SavedServicesError:
-            Alert(common, strings._("gui_identity_backup_archive_error"))
+        except SavedServicesError as replace_error:
+            Alert(common, _archive_failure_message(replace_error))
             return False
 
     Alert(common, strings._("gui_identity_backup_archive_saved"))
@@ -185,6 +261,9 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         self.is_busy = False
         self.generation = 0
         self._accepting_results = True
+        self._shutting_down = False
+        self._shutdown_complete = False
+        self._close_in_progress = False
 
         self.common.log("ExportIdentityBackupDialog", "__init__")
 
@@ -284,8 +363,12 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         thread = EncryptIdentityThread(self.identity, passphrase)
         self.encrypt_thread = thread
         self.encrypt_threads.append(thread)
-        thread.success.connect(self._encrypt_succeeded)
-        thread.error.connect(self._encrypt_failed)
+        thread.success.connect(
+            self._encrypt_succeeded, QtCore.Qt.ConnectionType.QueuedConnection
+        )
+        thread.error.connect(
+            self._encrypt_failed, QtCore.Qt.ConnectionType.QueuedConnection
+        )
         thread.start()
 
     def _encrypt_succeeded(self, envelope):
@@ -342,12 +425,113 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         if not filename:
             return
         try:
-            with open(filename, "wb") as handle:
-                handle.write(self.pending_bytes)
+            _write_exact_bytes(filename, self.pending_bytes)
         except OSError:
             Alert(self.common, strings._("gui_identity_backup_save_error"))
             return
         self.common.log("ExportIdentityBackupDialog", "save_to_file")
+
+    def _disconnect_thread(self, thread):
+        if thread is None:
+            return
+        try:
+            thread.success.disconnect(self._encrypt_succeeded)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            thread.error.disconnect(self._encrypt_failed)
+        except (RuntimeError, TypeError):
+            pass
+
+    def _reconnect_thread(self, thread):
+        if thread is None:
+            return
+        thread.success.connect(
+            self._encrypt_succeeded, QtCore.Qt.ConnectionType.QueuedConnection
+        )
+        thread.error.connect(
+            self._encrypt_failed, QtCore.Qt.ConnectionType.QueuedConnection
+        )
+
+    def _any_thread_running(self):
+        for thread in self.encrypt_threads:
+            try:
+                if thread.isRunning():
+                    return True
+            except RuntimeError:
+                continue
+        return False
+
+    def shutdown_encrypt_thread(self):
+        """
+        Stop accepting encrypt results and wait until the worker has finished.
+
+        accept, reject, and closeEvent all use this. A nested call (closeEvent
+        leading into reject) does not wait a second time. A timed-out wait
+        leaves the dialog open and accepting results again.
+        Returns True when no encrypt thread is still running.
+        """
+        if self._shutdown_complete:
+            return not self._any_thread_running()
+        if self._shutting_down:
+            return not self._any_thread_running()
+
+        self._shutting_down = True
+        self._accepting_results = False
+        threads = list(self.encrypt_threads)
+        for thread in threads:
+            self._disconnect_thread(thread)
+
+        for thread in threads:
+            try:
+                running = thread.isRunning()
+            except RuntimeError:
+                continue
+            if not running:
+                continue
+            finished = thread.wait(_ENCRYPT_THREAD_WAIT_MS)
+            try:
+                still_running = thread.isRunning()
+            except RuntimeError:
+                still_running = False
+            if not finished or still_running:
+                self._shutting_down = False
+                self._accepting_results = True
+                self._reconnect_thread(self.encrypt_thread)
+                return False
+
+        self._shutdown_complete = True
+        self._shutting_down = False
+        return True
+
+    def accept(self):
+        if self._close_in_progress:
+            return
+        if not self.shutdown_encrypt_thread():
+            return
+        self._close_in_progress = True
+        super(ExportIdentityBackupDialog, self).accept()
+
+    def reject(self):
+        # closeEvent's QDialog implementation calls reject. The outer close
+        # already waited; calling wait again from here would nest.
+        if self._close_in_progress:
+            super(ExportIdentityBackupDialog, self).reject()
+            return
+        if not self.shutdown_encrypt_thread():
+            return
+        self._close_in_progress = True
+        super(ExportIdentityBackupDialog, self).reject()
+
+    def closeEvent(self, event):
+        if self._close_in_progress:
+            super(ExportIdentityBackupDialog, self).closeEvent(event)
+            return
+        if not self.shutdown_encrypt_thread():
+            event.ignore()
+            return
+        self._close_in_progress = True
+        super(ExportIdentityBackupDialog, self).closeEvent(event)
 
     def save_to_saved_services_clicked(self):
         if self.is_busy:
@@ -355,9 +539,3 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         self.common.log("ExportIdentityBackupDialog", "save_to_saved_services_clicked")
         save_identity_to_saved_services(self.common, self, self.identity)
 
-    def closeEvent(self, event):
-        self._accepting_results = False
-        thread = self.encrypt_thread
-        if thread is not None and thread.isRunning():
-            thread.wait(180000)
-        super(ExportIdentityBackupDialog, self).closeEvent(event)

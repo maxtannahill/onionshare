@@ -11,17 +11,20 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from unittest import mock
 
 import pytest
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtTest, QtWidgets
+from shiboken6 import isValid
 
 from onionshare_cli.identity_backup import IdentityBackupError, decrypt_identity
 
-from onionshare import strings
+from onionshare import identity_backup_dialog, strings
+from onionshare.identity_backup_dialog import identity_for_open_tab
 from onionshare.tab.server_status import ServerStatus
-from onionshare.widgets import QRCodeDialog, qr_code_pixmap
+from onionshare.widgets import Alert, QRCodeDialog, qr_code_pixmap
 
 from .gui_base_test import GuiBaseTest
 
@@ -43,6 +46,19 @@ def _fixture_identity():
         "client_auth_pub_key": document["onion"]["client_auth_pub_key"],
         "public": document["general"]["public"],
     }
+
+
+def _inject_keys_keep_mode_null(mode_settings, identity):
+    """Copy the key fields and leave persistent.mode untouched."""
+    mode_settings._settings["general"]["service_id"] = identity["service_id"]
+    mode_settings._settings["general"]["public"] = identity["public"]
+    mode_settings._settings["onion"]["private_key"] = identity["private_key"]
+    mode_settings._settings["onion"]["client_auth_priv_key"] = identity[
+        "client_auth_priv_key"
+    ]
+    mode_settings._settings["onion"]["client_auth_pub_key"] = identity[
+        "client_auth_pub_key"
+    ]
 
 
 def _inject_identity(mode_settings, identity):
@@ -101,12 +117,19 @@ class TestIdentityBackupGui(GuiBaseTest):
 
     def tearDown(self):
         dialog = getattr(self, "_dialog", None)
-        if dialog is not None:
-            thread = dialog.encrypt_thread
-            if thread is not None and thread.isRunning():
-                thread.wait(180000)
-            dialog.close()
-            self._dialog = None
+        self._dialog = None
+        if dialog is not None and isValid(dialog):
+            try:
+                thread = dialog.encrypt_thread
+                if (
+                    thread is not None
+                    and isValid(thread)
+                    and thread.isRunning()
+                ):
+                    thread.wait(180000)
+                dialog.close()
+            except RuntimeError:
+                pass
         self.close_all_tabs()
 
     def _wait_until(self, predicate, timeout=120):
@@ -529,3 +552,326 @@ class TestIdentityBackupGui(GuiBaseTest):
             [str(message) for message in order],
             _secrets_of(identity),
         )
+
+    def _prepare_share_with_identity(self):
+        identity = _fixture_identity()
+        tab = self.new_share_tab()
+        _inject_identity(tab.settings, identity)
+        tab.get_mode().mode_settings_widget.update_ui()
+        return tab
+
+    def _close_tab_now(self):
+        self.gui.tabs.tabBar().tabButton(
+            0, QtWidgets.QTabBar.ButtonPosition.RightSide
+        ).click()
+
+    def test_close_button_during_kdf_finishes_thread_without_alert_or_file(self):
+        tab = self._prepare_share_with_identity()
+        widget = tab.get_mode().mode_settings_widget
+        started = threading.Event()
+        alerts = []
+        saves = []
+        real_encrypt = identity_backup_dialog.encrypt_identity
+        real_alert_init = Alert.__init__
+
+        def slow(identity, passphrase):
+            started.set()
+            time.sleep(0.8)
+            return real_encrypt(identity, passphrase)
+
+        def alert_init(box, common, message, *args, **kwargs):
+            alerts.append(message)
+            return real_alert_init(box, common, message, *args, **kwargs)
+
+        def record_save(*args, **kwargs):
+            saves.append(True)
+            return ("", "")
+
+        with mock.patch.object(identity_backup_dialog, "encrypt_identity", slow):
+            with mock.patch.object(Alert, "__init__", alert_init):
+                with mock.patch.object(
+                    QtWidgets.QFileDialog, "getSaveFileName", record_save
+                ):
+                    def close_when_started():
+                        dialog = widget.identity_backup_dialog
+                        if dialog is None or not started.is_set():
+                            QtCore.QTimer.singleShot(10, close_when_started)
+                            return
+                        dialog.close_button.click()
+
+                    QtCore.QTimer.singleShot(10, close_when_started)
+                    widget.export_identity_backup_button.click()
+                    dialog = widget.identity_backup_dialog
+                    self._dialog = dialog
+                    thread = dialog.encrypt_thread
+        self.gui.qtapp.processEvents()
+        self.assertFalse(thread.isRunning())
+        self.assertTrue(thread.isFinished())
+        self.assertFalse(dialog.isVisible())
+        self.assertFalse(alerts)
+        self.assertFalse(saves)
+        self.assertEqual(
+            tab.get_mode().server_status.status, ServerStatus.STATUS_STOPPED
+        )
+
+    def test_escape_during_kdf_finishes_thread_without_alert_or_file(self):
+        tab = self._prepare_share_with_identity()
+        widget = tab.get_mode().mode_settings_widget
+        started = threading.Event()
+        alerts = []
+        saves = []
+        real_encrypt = identity_backup_dialog.encrypt_identity
+        real_alert_init = Alert.__init__
+
+        def slow(identity, passphrase):
+            started.set()
+            time.sleep(0.8)
+            return real_encrypt(identity, passphrase)
+
+        def alert_init(box, common, message, *args, **kwargs):
+            alerts.append(message)
+            return real_alert_init(box, common, message, *args, **kwargs)
+
+        def record_save(*args, **kwargs):
+            saves.append(True)
+            return ("", "")
+
+        with mock.patch.object(identity_backup_dialog, "encrypt_identity", slow):
+            with mock.patch.object(Alert, "__init__", alert_init):
+                with mock.patch.object(
+                    QtWidgets.QFileDialog, "getSaveFileName", record_save
+                ):
+                    def escape_when_started():
+                        dialog = widget.identity_backup_dialog
+                        if dialog is None or not started.is_set():
+                            QtCore.QTimer.singleShot(10, escape_when_started)
+                            return
+                        QtTest.QTest.keyClick(dialog, QtCore.Qt.Key.Key_Escape)
+
+                    QtCore.QTimer.singleShot(10, escape_when_started)
+                    widget.export_identity_backup_button.click()
+                    dialog = widget.identity_backup_dialog
+                    self._dialog = dialog
+                    thread = dialog.encrypt_thread
+        self.gui.qtapp.processEvents()
+        self.assertFalse(thread.isRunning())
+        self.assertTrue(thread.isFinished())
+        self.assertFalse(dialog.isVisible())
+        self.assertFalse(alerts)
+        self.assertFalse(saves)
+
+    def test_tab_close_during_kdf_finishes_thread_without_alert_or_file(self):
+        tab = self._prepare_share_with_identity()
+        widget = tab.get_mode().mode_settings_widget
+        started = threading.Event()
+        alerts = []
+        saves = []
+        real_encrypt = identity_backup_dialog.encrypt_identity
+        real_alert_init = Alert.__init__
+
+        def slow(identity, passphrase):
+            started.set()
+            time.sleep(0.8)
+            return real_encrypt(identity, passphrase)
+
+        def alert_init(box, common, message, *args, **kwargs):
+            alerts.append(message)
+            return real_alert_init(box, common, message, *args, **kwargs)
+
+        def record_save(*args, **kwargs):
+            saves.append(True)
+            return ("", "")
+
+        with mock.patch.object(identity_backup_dialog, "encrypt_identity", slow):
+            with mock.patch.object(Alert, "__init__", alert_init):
+                with mock.patch.object(
+                    QtWidgets.QFileDialog, "getSaveFileName", record_save
+                ):
+                    with mock.patch.object(
+                        QtWidgets.QDialog,
+                        "exec",
+                        return_value=QtWidgets.QDialog.DialogCode.Accepted,
+                    ):
+                        widget.export_identity_backup_button.click()
+                    dialog = widget.identity_backup_dialog
+                    self._dialog = dialog
+                    self._wait_until(started.is_set)
+                    thread = dialog.encrypt_thread
+                    self.assertTrue(thread.isRunning())
+                    self._close_tab_now()
+        self.gui.qtapp.processEvents()
+        self.assertFalse(thread.isRunning())
+        self.assertTrue(thread.isFinished())
+        self.assertFalse(alerts)
+        self.assertFalse(saves)
+        self._dialog = None
+
+    def test_actions_disabled_while_encryption_runs(self):
+        tab = self._prepare_share_with_identity()
+        widget = tab.get_mode().mode_settings_widget
+        started = threading.Event()
+        release = threading.Event()
+        seen = {}
+        real_encrypt = identity_backup_dialog.encrypt_identity
+
+        def slow(identity, passphrase):
+            started.set()
+            release.wait(timeout=30)
+            return real_encrypt(identity, passphrase)
+
+        with mock.patch.object(identity_backup_dialog, "encrypt_identity", slow):
+            def watch():
+                dialog = widget.identity_backup_dialog
+                if dialog is None or not started.is_set():
+                    QtCore.QTimer.singleShot(10, watch)
+                    return
+                if "save" not in seen:
+                    seen["save"] = dialog.save_button.isEnabled()
+                    seen["regenerate"] = dialog.regenerate_button.isEnabled()
+                    seen["archive"] = dialog.save_to_saved_services_button.isEnabled()
+                    seen["busy"] = dialog.is_busy
+                    release.set()
+                if dialog.generation >= 1 and not dialog.is_busy:
+                    dialog.accept()
+                    return
+                QtCore.QTimer.singleShot(20, watch)
+
+            QtCore.QTimer.singleShot(10, watch)
+            widget.export_identity_backup_button.click()
+            dialog = widget.identity_backup_dialog
+            self._dialog = dialog
+        self.assertTrue(seen.get("busy") is True)
+        self.assertTrue(seen.get("save") is False)
+        self.assertTrue(seen.get("regenerate") is False)
+        self.assertTrue(seen.get("archive") is False)
+        self.assertFalse(dialog.encrypt_thread.isRunning())
+
+    def test_null_persistent_mode_uses_open_tab_mode_without_mutation(self):
+        identity = _fixture_identity()
+        openers = (
+            ("share", self.new_share_tab),
+            ("receive", self.new_receive_tab),
+            ("website", self.new_website_tab),
+            ("chat", self.new_chat_tab),
+        )
+        for mode_name, opener in openers:
+            tab = opener()
+            _inject_keys_keep_mode_null(tab.settings, identity)
+            self.assertTrue(tab.settings.get("persistent", "mode") is None)
+            onion_before = tab.settings.get("onion", "private_key")
+            result = identity_for_open_tab(tab.settings, tab.mode)
+            self.assertTrue(result["mode"] == mode_name)
+            self.assertTrue(result["service_id"] == identity["service_id"])
+            self.assertTrue(result["public"] == identity["public"])
+            self.assertTrue(tab.settings.get("persistent", "mode") is None)
+            self.assertTrue(tab.settings.get("onion", "private_key") == onion_before)
+            self.assertTrue(tab.mode == mode_name)
+            self.close_all_tabs()
+
+    def test_failed_save_preserves_existing_file_and_temp(self):
+        tab = self._prepare_share_with_identity()
+        dialog = self._open_export_dialog(tab)
+        payload = dialog.pending_bytes
+        original = b"pre-existing-backup-bytes"
+        self.assertFalse(payload == original)
+
+        def attempt(explode):
+            directory = tempfile.mkdtemp()
+            path = os.path.join(directory, "backup.json")
+            with open(path, "wb") as handle:
+                handle.write(original)
+            with mock.patch.object(
+                QtWidgets.QFileDialog, "getSaveFileName", return_value=(path, "json")
+            ):
+                with mock.patch.object(
+                    QtWidgets.QMessageBox,
+                    "exec",
+                    return_value=QtWidgets.QMessageBox.StandardButton.Ok,
+                ):
+                    with explode:
+                        dialog.save_button.click()
+            with open(path, "rb") as handle:
+                kept = handle.read()
+            names = os.listdir(directory)
+            self.assertTrue(kept == original)
+            self.assertFalse(any(name.startswith(".tmp-") for name in names))
+
+        attempt(
+            mock.patch.object(
+                identity_backup_dialog.os, "replace", side_effect=OSError("replace")
+            )
+        )
+        attempt(
+            mock.patch.object(
+                identity_backup_dialog.os,
+                "fdopen",
+                side_effect=OSError("write"),
+            )
+        )
+        self.assertTrue(dialog.qr_text.encode("utf-8") == dialog.pending_bytes)
+
+    def test_invalid_label_shows_dedicated_message_and_writes_nothing(self):
+        identity = _fixture_identity()
+        tab = self.new_share_tab()
+        _inject_identity(tab.settings, identity)
+        widget = tab.get_mode().mode_settings_widget
+        widget.update_ui()
+        label = "bad\nlabel"
+        record_path = os.path.join(
+            self.gui.common.build_data_dir(),
+            "saved_services",
+            identity["service_id"] + ".json",
+        )
+        saved_before = list(self.gui.common.settings.get("saved_services"))
+        existed = os.path.exists(record_path)
+        before_bytes = None
+        if existed:
+            with open(record_path, "rb") as handle:
+                before_bytes = handle.read()
+        messages = []
+        real_alert_init = Alert.__init__
+
+        def alert_init(box, common, message, *args, **kwargs):
+            messages.append(message)
+            kwargs = dict(kwargs)
+            kwargs["autostart"] = False
+            return real_alert_init(box, common, message, *args, **kwargs)
+
+        log_messages, original_log = self._capture_common_log()
+        try:
+            ok = QtWidgets.QMessageBox.StandardButton.Ok
+            with mock.patch.object(Alert, "__init__", alert_init):
+                with mock.patch.object(
+                    QtWidgets.QMessageBox, "exec", return_value=ok
+                ):
+                    with mock.patch.object(
+                        QtWidgets.QInputDialog,
+                        "getText",
+                        return_value=(label, True),
+                    ):
+                        widget.save_to_saved_services_button.click()
+        finally:
+            self._restore_common_log(original_log)
+
+        dedicated = strings._("gui_identity_backup_invalid_label")
+        self.assertTrue(dedicated in messages)
+        self.assertTrue("100" in dedicated)
+        self.assertTrue("control" in dedicated)
+        if existed:
+            with open(record_path, "rb") as handle:
+                after_bytes = handle.read()
+            self.assertTrue(after_bytes == before_bytes)
+        else:
+            self.assertFalse(os.path.exists(record_path))
+        archive_dir = os.path.join(self.gui.common.build_data_dir(), "saved_services")
+        if os.path.isdir(archive_dir):
+            names = os.listdir(archive_dir)
+            self.assertFalse(any(name.startswith(".tmp-") for name in names))
+        self.assertEqual(
+            list(self.gui.common.settings.get("saved_services")), saved_before
+        )
+        blobs = ["" if message is None else str(message) for message in log_messages]
+        blobs.append("\n".join(str(message) for message in messages))
+        _assert_secrets_absent(self, blobs, [label])
+        for blob in blobs:
+            self.assertFalse("invalid label" in blob)

@@ -226,6 +226,28 @@ class ModeSettingsWidget(QtWidgets.QScrollArea):
         self.update_ui()
         QtCore.QTimer.singleShot(0, self._connect_identity_backup_status)
 
+    def event(self, event):
+        # deleteLater delivers DeferredDelete before the C++ object is destroyed.
+        # Finish a live export thread here so the worker is not destroyed mid-run.
+        if event.type() == QtCore.QEvent.Type.DeferredDelete:
+            self.shutdown_identity_backup()
+        return super(ModeSettingsWidget, self).event(event)
+
+    def shutdown_identity_backup(self):
+        """
+        Wait out any export encryption before this widget or its tab is destroyed.
+
+        Returns False when the worker is still running after the timed wait.
+        The caller should keep the tab open in that case.
+        """
+        dialog = getattr(self, "identity_backup_dialog", None)
+        if dialog is None:
+            return True
+        try:
+            return dialog.shutdown_encrypt_thread()
+        except RuntimeError:
+            return True
+
     def update_ui(self):
         # Update text on advanced group toggle button
         if self.advanced_widget.isVisible():

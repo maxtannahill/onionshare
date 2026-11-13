@@ -267,6 +267,7 @@
     "gui_identity_backup_archive_duplicate": "A saved service for this onion address already exists. Replace the saved copy with the current keys and label?",
     "gui_identity_backup_archive_not_replaced": "The existing saved service was left unchanged.",
     "gui_identity_backup_archive_error": "Could not save this service.",
+    "gui_identity_backup_invalid_label": "A saved service label must be 0–100 characters and must not contain control characters.",
     "mode_settings_autostart_timer_checkbox": "Start onion service at scheduled time",
     "mode_settings_autostop_timer_checkbox": "Stop onion service at scheduled time",
     "mode_settings_share_autostop_sharing_checkbox": "Stop sharing after files have been sent\n(uncheck to allow downloading individual files)",
