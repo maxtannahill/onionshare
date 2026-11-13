@@ -20,6 +20,8 @@ from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 from shiboken6 import isValid
 
 from onionshare_cli.identity_backup import IdentityBackupError, decrypt_identity
+from onionshare_cli import saved_services as saved_services_module
+from onionshare_cli.saved_services import SavedServices
 
 from onionshare import identity_backup_dialog, strings
 from onionshare.identity_backup_dialog import identity_for_open_tab
@@ -875,3 +877,169 @@ class TestIdentityBackupGui(GuiBaseTest):
         _assert_secrets_absent(self, blobs, [label])
         for blob in blobs:
             self.assertFalse("invalid label" in blob)
+
+    def test_archive_oserror_shows_fixed_message_and_writes_nothing(self):
+        """A durable-write OSError on Save to Saved Services shows the archive alert.
+
+        Covers a new record and a confirmed replace. Neither opens a tab.
+        The temp file is removed. Settings bytes, the persistent directory,
+        and the archive directory are unchanged by the failed write.
+        """
+        identity = _fixture_identity()
+        tab = self.new_share_tab()
+        _inject_identity(tab.settings, identity)
+        widget = tab.get_mode().mode_settings_widget
+        widget.update_ui()
+        self.assertTrue(widget.save_to_saved_services_button.isEnabled())
+
+        data_dir = self.gui.common.build_data_dir()
+        settings_path = self.gui.common.settings.filename
+        persistent_dir = os.path.join(data_dir, "persistent")
+        archive_dir = os.path.join(data_dir, "saved_services")
+        record_path = os.path.join(archive_dir, identity["service_id"] + ".json")
+        os.makedirs(archive_dir, 0o700, exist_ok=True)
+        archive = SavedServices(self.gui.common, self.gui.common.settings)
+        if os.path.isfile(record_path) or identity["service_id"] in list(
+            self.gui.common.settings.get("saved_services")
+        ):
+            archive.delete(identity["service_id"])
+
+        def read_bytes(path):
+            if not os.path.isfile(path):
+                return None
+            with open(path, "rb") as handle:
+                return handle.read()
+
+        def tree(path):
+            if not os.path.isdir(path):
+                return None
+            found = {}
+            for name in sorted(os.listdir(path)):
+                full = os.path.join(path, name)
+                if os.path.islink(full):
+                    found[name] = "link"
+                elif os.path.isfile(full):
+                    with open(full, "rb") as handle:
+                        found[name] = handle.read()
+                else:
+                    found[name] = "dir"
+            return found
+
+        def no_temp():
+            names = os.listdir(archive_dir)
+            self.assertFalse(any(name.startswith(".tmp-") for name in names))
+
+        disclosure = strings._("gui_identity_backup_archive_disclosure")
+        duplicate = strings._("gui_identity_backup_archive_duplicate")
+        archive_error = strings._("gui_identity_backup_archive_error")
+        saved = strings._("gui_identity_backup_archive_saved")
+        self.assertEqual(archive_error, "Could not save this service.")
+        disk_error = "disk-write-failed"
+        tab_count = self.gui.tabs.count()
+        log_messages, original_log = self._capture_common_log()
+
+        def attempt(label):
+            messages = []
+            replace_calls = []
+
+            def exec_box(box, *args, **kwargs):
+                text = box.text()
+                messages.append(text)
+                if text == duplicate:
+                    return QtWidgets.QMessageBox.StandardButton.Yes
+                return QtWidgets.QMessageBox.StandardButton.Ok
+
+            real_replace = saved_services_module.os.replace
+
+            def explode(src, dst, *args, **kwargs):
+                destination = dst if isinstance(dst, (str, bytes)) else ""
+                if isinstance(destination, bytes):
+                    destination = destination.decode("utf-8", "replace")
+                if "saved_services" in destination and destination.endswith(".json"):
+                    replace_calls.append(True)
+                    raise OSError(disk_error)
+                return real_replace(src, dst, *args, **kwargs)
+
+            with mock.patch.object(QtWidgets.QMessageBox, "exec", exec_box):
+                with mock.patch.object(
+                    QtWidgets.QInputDialog, "getText", return_value=(label, True)
+                ):
+                    with mock.patch.object(
+                        saved_services_module.os, "replace", explode
+                    ):
+                        widget.save_to_saved_services_button.click()
+            return messages, replace_calls
+
+        try:
+            self.gui.common.settings.save()
+            settings_before = read_bytes(settings_path)
+            persistent_before = tree(persistent_dir)
+            archive_before = tree(archive_dir)
+            self.assertTrue(settings_before is not None)
+            self.assertFalse(os.path.exists(record_path))
+
+            messages, replace_calls = attempt("first-label")
+            seen_messages = list(messages)
+            self.assertEqual(messages, [disclosure, archive_error])
+            self.assertEqual(
+                [text for text in messages if text != disclosure], [archive_error]
+            )
+            for text in messages:
+                self.assertFalse(disk_error in text)
+            self.assertEqual(replace_calls, [True])
+            self.assertFalse(os.path.exists(record_path))
+            no_temp()
+            self.assertTrue(read_bytes(settings_path) == settings_before)
+            self.assertTrue(tree(persistent_dir) == persistent_before)
+            self.assertTrue(tree(archive_dir) == archive_before)
+            self.assertEqual(self.gui.tabs.count(), tab_count)
+            self.assertEqual(
+                tab.get_mode().server_status.status, ServerStatus.STATUS_STOPPED
+            )
+
+            archive.add(identity, "seed-label")
+            self.assertTrue(os.path.isfile(record_path))
+            record_before = read_bytes(record_path)
+            settings_seed = read_bytes(settings_path)
+            persistent_seed = tree(persistent_dir)
+            archive_seed = tree(archive_dir)
+
+            messages, replace_calls = attempt("second-label")
+            seen_messages.extend(messages)
+            self.assertEqual(messages, [disclosure, duplicate, archive_error])
+            self.assertEqual(
+                [text for text in messages if text not in (disclosure, duplicate)],
+                [archive_error],
+            )
+            self.assertFalse(saved in messages)
+            self.assertFalse(
+                strings._("gui_identity_backup_invalid_label") in messages
+            )
+            self.assertEqual(replace_calls, [True])
+            self.assertTrue(read_bytes(record_path) == record_before)
+            no_temp()
+            self.assertTrue(read_bytes(settings_path) == settings_seed)
+            self.assertTrue(tree(persistent_dir) == persistent_seed)
+            self.assertTrue(tree(archive_dir) == archive_seed)
+            self.assertEqual(self.gui.tabs.count(), tab_count)
+            self.assertEqual(
+                tab.get_mode().server_status.status, ServerStatus.STATUS_STOPPED
+            )
+            for text in messages:
+                self.assertFalse(disk_error in text)
+        finally:
+            self._restore_common_log(original_log)
+            try:
+                SavedServices(self.gui.common, self.gui.common.settings).delete(
+                    identity["service_id"]
+                )
+            except Exception:
+                pass
+
+        blobs = self._log_blobs(log_messages)
+        blobs.append("\n".join(seen_messages))
+        _assert_secrets_absent(
+            self,
+            blobs,
+            _secrets_of(identity) + [disk_error],
+        )

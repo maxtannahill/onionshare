@@ -27,6 +27,7 @@ import pytest
 from PySide6 import QtCore, QtTest, QtWidgets
 
 from onionshare_cli.identity_backup import IdentityBackupError, encrypt_identity
+from onionshare_cli import saved_services as saved_services_module
 from onionshare_cli.saved_services import SavedServices
 
 from onionshare import identity_import_dialog, strings
@@ -159,6 +160,7 @@ class IdentityImportCase(GuiBaseTest):
 
         self.gui.common.log = wrapped_log
         self._temp_paths = []
+        self._temp_dirs = []
         self._timed_out = False
         self._quiesce_tabs()
         self.gui.tabs.close_settings_tab()
@@ -186,7 +188,16 @@ class IdentityImportCase(GuiBaseTest):
         self._clear_archive()
         for path in getattr(self, "_temp_paths", []):
             try:
+                os.chmod(path, 0o644)
+            except OSError:
+                pass
+            try:
                 os.remove(path)
+            except OSError:
+                pass
+        for path in getattr(self, "_temp_dirs", []):
+            try:
+                os.rmdir(path)
             except OSError:
                 pass
 
@@ -813,6 +824,61 @@ class IdentityImportCase(GuiBaseTest):
             file_path = self._write_temp(b"\xff\xfe" + b"\x80\x81")
             pasted = None
             typed = PASSPHRASE_TYPED
+        elif kind == "empty":
+            pasted = ""
+            typed = PASSPHRASE_TYPED
+        elif kind == "empty_file":
+            file_path = self._write_temp(b"")
+            pasted = None
+            typed = PASSPHRASE_TYPED
+        elif kind == "bad_params":
+            payload = json.loads(envelope)
+            original_m = payload["m"]
+            payload["m"] = original_m + 1
+            pasted = json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+            self.assertTrue(payload["m"] != original_m)
+            self.assertTrue(len(pasted) <= 8192)
+            self.assertTrue(len(pasted.encode("utf-8")) <= 8192)
+            typed = PASSPHRASE_TYPED
+        elif kind == "permission":
+            file_path = self._write_temp(b"backup")
+            os.chmod(file_path, 0)
+            denied = False
+            try:
+                with open(file_path, "rb") as handle:
+                    handle.read()
+            except PermissionError:
+                denied = True
+            self.assertTrue(denied)
+            pasted = None
+            typed = PASSPHRASE_TYPED
+        elif kind == "directory":
+            file_path = tempfile.mkdtemp(prefix="os-import-dir-")
+            self._temp_dirs.append(file_path)
+            self.assertTrue(os.path.isdir(file_path))
+            pasted = None
+            typed = PASSPHRASE_TYPED
+        elif kind == "vanished":
+            folder = tempfile.mkdtemp(prefix="os-import-dir-")
+            self._temp_dirs.append(folder)
+            file_path = os.path.join(folder, "gone.json")
+            self.assertFalse(os.path.exists(file_path))
+            pasted = None
+            typed = PASSPHRASE_TYPED
+        elif kind == "oversize_paste":
+            pasted = "a" * 8193
+            self.assertTrue(len(pasted) == 8193)
+            self.assertTrue(pasted.isascii())
+            typed = PASSPHRASE_TYPED
+        elif kind == "oversize_ascii":
+            file_path = self._write_temp(b"a" * 8193)
+            raw = self._read_bytes(file_path)
+            self.assertTrue(raw == b"a" * 8193)
+            self.assertTrue(raw.decode("utf-8") == "a" * 8193)
+            pasted = None
+            typed = PASSPHRASE_TYPED
         else:
             self.fail("unknown failure kind")
 
@@ -847,8 +913,21 @@ class IdentityImportCase(GuiBaseTest):
         self.assertFalse(self._timed_out)
         self.assertEqual(messages, [generic])
         self.assertEqual(calls, [])
+        self.assertEqual(self._tabs_for_service(identity["service_id"]), [])
+        self.assertFalse(os.path.exists(self._record_path(identity["service_id"])))
         self._assert_unchanged(captured["before"])
-        if kind in ("oversize", "non_utf8"):
+        # Decodable oversize bytes never reach decrypt, so the file cap is
+        # not only a Unicode rejection.
+        pre_decrypt = (
+            "oversize",
+            "non_utf8",
+            "oversize_paste",
+            "oversize_ascii",
+            "permission",
+            "directory",
+            "vanished",
+        )
+        if kind in pre_decrypt:
             self.assertEqual(decrypt_calls, [])
             self.assertTrue(dialog.decrypt_thread is None)
         else:
@@ -863,6 +942,88 @@ class IdentityImportCase(GuiBaseTest):
             secrets.append(pasted)
         secrets.append(envelope)
         self._assert_secrets_absent(secrets)
+
+    def run_archive_write_error(self, envelopes):
+        """An OSError from the durable write shows the archive alert only.
+
+        The tab is not opened, the temp file is removed, and the settings
+        file bytes plus both directories stay as they were.
+        """
+        identity = envelopes["share"]["identity"]
+        envelope = envelopes["share"]["envelope"]
+        archive_error = strings._("gui_identity_backup_archive_error")
+        disclosure = strings._("gui_identity_backup_archive_disclosure")
+        self.assertEqual(archive_error, "Could not save this service.")
+        disk_error = "disk-write-failed"
+        messages = []
+        calls = []
+        replace_calls = []
+        label_calls = []
+        real_open = TabWidget.open_saved_service
+        archive_dir = os.path.join(self._data_dir(), "saved_services")
+        os.makedirs(archive_dir, 0o700, exist_ok=True)
+
+        def exec_box(box, *args, **kwargs):
+            messages.append(box.text())
+            return QtWidgets.QMessageBox.StandardButton.Ok
+
+        def spy(self, opened_identity, opened_label=None):
+            calls.append(True)
+            return real_open(self, opened_identity, opened_label)
+
+        real_replace = saved_services_module.os.replace
+
+        def explode(src, dst, *args, **kwargs):
+            destination = dst if isinstance(dst, (str, bytes)) else ""
+            if isinstance(destination, bytes):
+                destination = destination.decode("utf-8", "replace")
+            if "saved_services" in destination and destination.endswith(".json"):
+                replace_calls.append(True)
+                raise OSError(disk_error)
+            return real_replace(src, dst, *args, **kwargs)
+
+        def get_text(*args, **kwargs):
+            label_calls.append(True)
+            return ("archive-label", True)
+
+        captured = {}
+
+        def prepare(dialog):
+            self.gui.common.settings.save()
+            captured["before"] = self._capture()
+            dialog.paste_radio.setChecked(True)
+            dialog.envelope_edit.setPlainText(envelope)
+            dialog.passphrase_edit.setText(PASSPHRASE_TYPED)
+            dialog.import_button.click()
+
+        with mock.patch.object(saved_services_module.os, "replace", explode):
+            with mock.patch.object(TabWidget, "open_saved_service", spy):
+                with mock.patch.object(QtWidgets.QMessageBox, "exec", exec_box):
+                    with mock.patch.object(QtWidgets.QInputDialog, "getText", get_text):
+                        self._drive(prepare)
+
+        self.assertFalse(self._timed_out)
+        self.assertTrue(captured["before"]["settings"] is not None)
+        self.assertEqual(messages, [disclosure, archive_error])
+        self.assertEqual(
+            [text for text in messages if text != disclosure], [archive_error]
+        )
+        self.assertFalse(GENERIC in messages)
+        self.assertFalse(strings._("gui_identity_backup_invalid_label") in messages)
+        for text in messages:
+            self.assertFalse(disk_error in text)
+        self.assertEqual(label_calls, [True])
+        self.assertEqual(replace_calls, [True])
+        self.assertEqual(calls, [])
+        self.assertEqual(self._tabs_for_service(identity["service_id"]), [])
+        self.assertFalse(os.path.exists(self._record_path(identity["service_id"])))
+        names = os.listdir(archive_dir)
+        self.assertFalse(any(name.startswith(".tmp-") for name in names))
+        self._assert_unchanged(captured["before"])
+        self._assert_secrets_absent(
+            _secrets_of(identity, envelope, PASSPHRASE_TYPED)
+            + [PASSPHRASE_STRIPPED, disk_error]
+        )
 
     def run_decline_existing(self, envelopes):
         """Declining a replace writes nothing and opens nothing."""
@@ -1393,7 +1554,21 @@ def test_import_public_identity_opens_stopped(
 
 @pytest.mark.parametrize(
     "kind",
-    ["wrong_passphrase", "truncated", "oversize", "non_utf8", "extra_key"],
+    [
+        "wrong_passphrase",
+        "truncated",
+        "oversize",
+        "non_utf8",
+        "extra_key",
+        "empty",
+        "empty_file",
+        "bad_params",
+        "permission",
+        "directory",
+        "vanished",
+        "oversize_paste",
+        "oversize_ascii",
+    ],
 )
 def test_failed_import_has_no_side_effects(
     identity_import_case, envelopes, kind, caplog, capsys
@@ -1401,6 +1576,16 @@ def test_failed_import_has_no_side_effects(
     case = _bind(identity_import_case, "run_failure", caplog, capsys)
     try:
         case.run_failure(envelopes, kind)
+    finally:
+        case.tearDown()
+
+
+def test_archive_write_error_opens_nothing(
+    identity_import_case, envelopes, caplog, capsys
+):
+    case = _bind(identity_import_case, "run_archive_write_error", caplog, capsys)
+    try:
+        case.run_archive_write_error(envelopes)
     finally:
         case.tearDown()
 

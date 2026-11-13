@@ -504,6 +504,9 @@ class ImportIdentityDialog(QtWidgets.QDialog):
             except SavedServicesError as error:
                 Alert(self.common, _archive_failure_message(error))
                 return False
+            except Exception:
+                Alert(self.common, strings._("gui_identity_backup_archive_error"))
+                return False
             self.common.log("ImportIdentityDialog", "archive_replaced")
             return True
 
@@ -511,6 +514,9 @@ class ImportIdentityDialog(QtWidgets.QDialog):
             archive.add(identity, label, replace=False)
         except SavedServicesError as error:
             Alert(self.common, _archive_failure_message(error))
+            return False
+        except Exception:
+            Alert(self.common, strings._("gui_identity_backup_archive_error"))
             return False
         self.common.log("ImportIdentityDialog", "archive_added")
         return True
