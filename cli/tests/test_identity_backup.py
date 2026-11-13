@@ -710,6 +710,36 @@ class TestRoundTrip:
         opened = decrypt_identity(first, passphrase)
         assert _same_identity(opened, identity)
 
+    def test_docs_say_leading_and_trailing_whitespace(self):
+        root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+        rst = open(
+            os.path.join(root, "docs", "source", "advanced.rst"), encoding="utf-8"
+        ).read()
+        catalog = open(
+            os.path.join(
+                root,
+                "desktop",
+                "onionshare",
+                "resources",
+                "locale",
+                "en.json",
+            ),
+            encoding="utf-8",
+        ).read()
+        stale = "Only spaces before or after"
+        if stale in rst or stale in catalog:
+            raise AssertionError(
+                "passphrase copy still says only spaces are ignored"
+            )
+        if "leading and trailing whitespace" not in rst.lower():
+            raise AssertionError("manual does not say leading and trailing whitespace")
+        if "leading and trailing whitespace" not in catalog.lower():
+            raise AssertionError(
+                "en.json does not say leading and trailing whitespace"
+            )
+
     def test_crypto_failures_share_one_error(self):
         identity = _identity("share", public=False, client_auth=True)
         passphrase = "one-time-backup-phrase"
