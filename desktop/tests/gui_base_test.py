@@ -579,3 +579,12 @@ class GuiBaseTest(unittest.TestCase):
         self.gui_loaded()
         self.window_title_seen()
         self.server_status_bar_is_visible()
+
+
+def bind_gui_case(case_cls, name, caplog, capsys):
+    """Return a GuiBaseTest case after setUp, with pytest capture attached."""
+    case = case_cls(name)
+    case.caplog = caplog
+    case.capsys = capsys
+    case.setUp()
+    return case

@@ -39,7 +39,7 @@ from onionshare.tab.tab import Tab
 from onionshare.tab_widget import TabWidget
 from onionshare.widgets import Alert
 
-from .gui_base_test import GuiBaseTest
+from .gui_base_test import GuiBaseTest, bind_gui_case
 
 
 # Outer spaces are part of what the line edit holds. decrypt_identity strips
@@ -1520,20 +1520,12 @@ def identity_import_case():
     IdentityImportCase.tearDownClass()
 
 
-def _bind(case_cls, name, caplog, capsys):
-    case = case_cls(name)
-    case.caplog = caplog
-    case.capsys = capsys
-    case.setUp()
-    return case
-
-
 @pytest.mark.parametrize("mode", list(_MODES))
 @pytest.mark.parametrize("source", ["file", "paste"])
 def test_import_backup_opens_stopped_tab(
     identity_import_case, envelopes, mode, source, caplog, capsys
 ):
-    case = _bind(identity_import_case, "run_import", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_import", caplog, capsys)
     try:
         case.run_import(envelopes, mode, source)
     finally:
@@ -1543,7 +1535,7 @@ def test_import_backup_opens_stopped_tab(
 def test_import_public_identity_opens_stopped(
     identity_import_case, envelopes, caplog, capsys
 ):
-    case = _bind(identity_import_case, "run_public_import", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_public_import", caplog, capsys)
     try:
         case.run_public_import(envelopes)
     finally:
@@ -1571,7 +1563,7 @@ def test_import_public_identity_opens_stopped(
 def test_failed_import_has_no_side_effects(
     identity_import_case, envelopes, kind, caplog, capsys
 ):
-    case = _bind(identity_import_case, "run_failure", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_failure", caplog, capsys)
     try:
         case.run_failure(envelopes, kind)
     finally:
@@ -1581,7 +1573,7 @@ def test_failed_import_has_no_side_effects(
 def test_archive_write_error_opens_nothing(
     identity_import_case, envelopes, caplog, capsys
 ):
-    case = _bind(identity_import_case, "run_archive_write_error", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_archive_write_error", caplog, capsys)
     try:
         case.run_archive_write_error(envelopes)
     finally:
@@ -1591,7 +1583,7 @@ def test_archive_write_error_opens_nothing(
 def test_existing_record_decline_writes_nothing(
     identity_import_case, envelopes, caplog, capsys
 ):
-    case = _bind(identity_import_case, "run_decline_existing", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_decline_existing", caplog, capsys)
     try:
         case.run_decline_existing(envelopes)
     finally:
@@ -1601,7 +1593,7 @@ def test_existing_record_decline_writes_nothing(
 def test_identical_keys_open_without_rewrite(
     identity_import_case, envelopes, caplog, capsys
 ):
-    case = _bind(identity_import_case, "run_identical_opens_without_rewrite", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_identical_opens_without_rewrite", caplog, capsys)
     try:
         case.run_identical_opens_without_rewrite(envelopes)
     finally:
@@ -1611,7 +1603,7 @@ def test_identical_keys_open_without_rewrite(
 def test_duplicate_open_starts_neither_service(
     identity_import_case, envelopes, caplog, capsys
 ):
-    case = _bind(identity_import_case, "run_duplicate_open", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_duplicate_open", caplog, capsys)
     try:
         case.run_duplicate_open(envelopes)
     finally:
@@ -1622,7 +1614,7 @@ def test_duplicate_open_starts_neither_service(
 def test_cancel_before_archive_writes_nothing(
     identity_import_case, envelopes, stage, caplog, capsys
 ):
-    case = _bind(identity_import_case, "run_cancel_before_write", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_cancel_before_write", caplog, capsys)
     try:
         case.run_cancel_before_write(envelopes, stage)
     finally:
@@ -1630,7 +1622,7 @@ def test_cancel_before_archive_writes_nothing(
 
 
 def test_invalid_label_writes_nothing(identity_import_case, envelopes, caplog, capsys):
-    case = _bind(identity_import_case, "run_invalid_label", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_invalid_label", caplog, capsys)
     try:
         case.run_invalid_label(envelopes)
     finally:
@@ -1641,7 +1633,7 @@ def test_invalid_label_writes_nothing(identity_import_case, envelopes, caplog, c
 def test_close_or_escape_during_kdf_has_no_late_tab(
     identity_import_case, envelopes, how, caplog, capsys
 ):
-    case = _bind(identity_import_case, "run_close_during_kdf", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_close_during_kdf", caplog, capsys)
     try:
         case.run_close_during_kdf(envelopes, how)
     finally:
@@ -1651,7 +1643,7 @@ def test_close_or_escape_during_kdf_has_no_late_tab(
 def test_settings_tab_close_during_kdf_has_no_late_tab(
     identity_import_case, envelopes, caplog, capsys
 ):
-    case = _bind(identity_import_case, "run_tab_close_during_kdf", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_tab_close_during_kdf", caplog, capsys)
     try:
         case.run_tab_close_during_kdf(envelopes)
     finally:
@@ -1659,7 +1651,7 @@ def test_settings_tab_close_during_kdf_has_no_late_tab(
 
 
 def test_inputs_disabled_while_decrypt_runs(identity_import_case, caplog, capsys):
-    case = _bind(identity_import_case, "run_inputs_disabled_while_decrypting", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_inputs_disabled_while_decrypting", caplog, capsys)
     try:
         case.run_inputs_disabled_while_decrypting()
     finally:
@@ -1669,7 +1661,7 @@ def test_inputs_disabled_while_decrypt_runs(identity_import_case, caplog, capsys
 def test_import_has_no_camera_or_qr_decode_path(
     identity_import_case, envelopes, caplog, capsys
 ):
-    case = _bind(identity_import_case, "run_no_camera_or_qr_decode", caplog, capsys)
+    case = bind_gui_case(identity_import_case, "run_no_camera_or_qr_decode", caplog, capsys)
     try:
         case.run_no_camera_or_qr_decode(envelopes)
     finally:
