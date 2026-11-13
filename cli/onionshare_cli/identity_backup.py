@@ -37,13 +37,17 @@ import nacl.utils
 # (opslimit 2, memlimit 67108864). Libsodium's parallelism is fixed at 1, so
 # readers require p == 1 and the KDF call does not take a parallelism argument.
 #
-# The onion private key is the Tor ED25519-V3 blob: 32-byte secret scalar
-# followed by 32-byte PRF secret, standard base64, not a seed concatenated
-# with a public key. The service id is checked by multiplying that scalar
-# (nacl.bindings.crypto_scalarmult_ed25519_base_noclamp) and comparing the
-# rend-spec-v3 address. PyNaCl's SigningKey cannot load this blob because the
-# seed is not stored. The PRF half cannot be checked for the same reason.
-# The address checksum is SHA3-256 from hashlib; nacl.hash has no SHA3.
+# The onion private key is the Tor ED25519-V3 blob: a 32-byte secret scalar
+# followed by a 32-byte PRF secret, standard base64. It is not an Ed25519
+# seed, and the second half is not a stored public key. The service id is
+# checked by deriving the public key from that scalar
+# (nacl.bindings.crypto_scalarmult_ed25519_base_noclamp, which does not
+# clamp) and comparing the rend-spec-v3 address: base32 of the public key,
+# the first two bytes of SHA3-256(".onion checksum" || public key || 0x03),
+# and version byte 0x03, lowercased. The PRF half is not cross-checked,
+# because the blob does not store a public key. PyNaCl's SigningKey cannot
+# load this blob because the 32-byte seed is not stored. The checksum uses
+# hashlib.sha3_256; nacl.hash has no SHA3.
 
 _IDENTITY_KEYS = frozenset(
     {
@@ -192,7 +196,15 @@ def _decode_canonical_client_auth(value):
 
 
 def _service_id_from_private_key(blob):
-    """Return the v3 onion id for a Tor ED25519-V3 private key blob."""
+    """Return the v3 onion id for a Tor ED25519-V3 private key blob.
+
+    The first 32 bytes are the secret scalar, not an Ed25519 seed and not
+    a public key. The public key is that scalar multiplied by the Ed25519
+    base point, without clamping. The last 32 bytes are the PRF secret.
+    They are not a stored public half and are not compared. The returned
+    id is the rend-spec-v3 address: base32 of the public key, a 2-byte
+    SHA3-256 checksum, and version byte 0x03, lowercased.
+    """
     if len(blob) != _PRIVATE_KEY_BYTES:
         _reject()
     try:
