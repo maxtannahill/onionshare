@@ -76,6 +76,24 @@ Renaming changes only the label.
 Deleting removes that saved service.
 It does not change persistent tabs, and it does not start or stop a service that is already open.
 
+Compatibility and downgrade
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``persistent_tabs`` means the same thing as before.
+On startup OnionShare still opens only the ids in that list, each from ``persistent/<id>.json``.
+Nothing copies an existing persistent tab into Saved Services.
+Saving an identity, importing a backup, or opening a saved service does not add it to ``persistent_tabs``, and it does not turn on "Always open this tab when OnionShare is started" or automatic start.
+
+OnionShare 2.7.2 does not know about Saved Services.
+When ``onionshare.json`` loads, unknown keys such as ``saved_services`` stay in the settings object, and a later save writes that whole object back out.
+The key is not read.
+The ``saved_services`` directory next to ``persistent`` is not opened, migrated, or deleted, so the record files stay on disk unused.
+If the settings file cannot be parsed, 2.7.2 keeps its built-in defaults, and a later save replaces the file with those defaults.
+
+An encrypted identity backup is not a persistent-tab file.
+OnionShare 2.7.2 cannot import it.
+Importing a version 1 backup requires a version of OnionShare that supports that backup.
+
 .. _turn_off_private_key:
 
 Turn Off Private Key
