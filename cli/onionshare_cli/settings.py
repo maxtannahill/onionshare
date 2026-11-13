@@ -124,6 +124,7 @@ class Settings(object):
             "bridges_custom": "",
             "bridges_builtin": {},
             "persistent_tabs": [],
+            "saved_services": [],
             "locale": None,  # this gets defined in fill_in_defaults()
             "theme": 0,
         }
