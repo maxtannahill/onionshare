@@ -452,10 +452,7 @@ class TestSavedServices:
         os.symlink(outside, path)
         with pytest.raises(saved_services.SavedServicesError, match="symlink"):
             store.get(identity["service_id"])
-        with pytest.raises(saved_services.SavedServicesError, match="symlink"):
-            store.list()
-        with pytest.raises(saved_services.SavedServicesError, match="symlink"):
-            store.delete(identity["service_id"])
+        assert store.list() == []
         with pytest.raises(saved_services.SavedServicesError, match="symlink"):
             store.rename(identity["service_id"], "other")
         assert os.path.islink(path)
@@ -472,8 +469,7 @@ class TestSavedServices:
             handle.write(duplicated)
         with pytest.raises(saved_services.SavedServicesError, match="duplicate"):
             store.get(identity["service_id"])
-        with pytest.raises(saved_services.SavedServicesError, match="duplicate"):
-            store.list()
+        assert store.list() == []
         assert _read(path).decode("utf-8") == duplicated
 
     def test_corrupted_record_raises_and_is_kept(self, store):
@@ -485,8 +481,7 @@ class TestSavedServices:
             handle.write(blob)
         with pytest.raises(saved_services.SavedServicesError, match="corrupt"):
             store.get(identity["service_id"])
-        with pytest.raises(saved_services.SavedServicesError, match="corrupt"):
-            store.list()
+        assert store.list() == []
         assert _read(path) == blob
 
         nan = (
@@ -704,3 +699,44 @@ class TestSavedServices:
             store.get(identity["service_id"])
         assert caught.value.__cause__ is None
         assert _read(path) == blob
+
+    def test_bad_records_do_not_hide_good_ones_and_delete_clears_them(
+        self, store, tmp_path
+    ):
+        good = _identity(public=True)
+        truncated = _identity(public=True)
+        linked = _identity(public=True)
+        store.add(good, "good", saved_at=_SAVED_AT)
+        store.add(truncated, "truncated", saved_at=_SAVED_AT)
+        store.add(linked, "linked", saved_at=_SAVED_AT)
+        good_record = store.get(good["service_id"])
+
+        trunc_path = _record_path(store, truncated["service_id"])
+        with open(trunc_path, "wb") as handle:
+            handle.write(b"{")
+
+        link_path = _record_path(store, linked["service_id"])
+        payload = _read(link_path)
+        outside = tmp_path / "outside-target.json"
+        outside.write_bytes(payload)
+        os.remove(link_path)
+        os.symlink(outside, link_path)
+
+        listed = store.list()
+        assert [item["service_id"] for item in listed] == [good["service_id"]]
+        assert listed[0] == good_record
+        assert _read(trunc_path) == b"{"
+        assert os.path.islink(link_path)
+        assert _read(outside) == payload
+
+        store.delete(truncated["service_id"])
+        assert not os.path.lexists(trunc_path)
+        store.delete(linked["service_id"])
+        assert not os.path.lexists(link_path)
+        assert outside.is_file()
+        assert _read(outside) == payload
+        fresh = _reload(store)
+        assert fresh.get("saved_services") == [good["service_id"]]
+        again = store.list()
+        assert [item["service_id"] for item in again] == [good["service_id"]]
+        assert again[0]["private_key"] == good["private_key"]

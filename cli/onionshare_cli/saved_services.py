@@ -252,8 +252,18 @@ class SavedServices(object):
         return record
 
     def list(self):
-        """Return the archived records in ``saved_services`` order."""
-        return [self.get(service_id) for service_id in self._saved_id_list()]
+        """Return readable archived records in ``saved_services`` order.
+
+        A missing, damaged, or symlinked id is skipped. ``get`` still raises
+        for that id, and one bad entry does not hide the others.
+        """
+        records = []
+        for service_id in self._saved_id_list():
+            try:
+                records.append(self.get(service_id))
+            except SavedServicesError:
+                continue
+        return records
 
     def get(self, service_id):
         """
@@ -273,16 +283,22 @@ class SavedServices(object):
         Remove the record file and the id from ``saved_services`` only.
 
         Does not change ``persistent_tabs`` or anything under ``persistent/``.
+        A symlink is unlinked itself and is not followed, so its target is
+        left untouched. A directory or fifo is left in place; the settings
+        id is still dropped.
         """
         ids = self._saved_id_list()
         directory = self._archive_dir(create=False)
-        path = self._record_path(directory, service_id)
-        existed = os.path.isfile(path)
+        path = self._service_record_path(directory, service_id)
+        # isfile() follows symlinks. Classify the directory entry first so
+        # unlink removes the link and never opens its target.
+        link = os.path.islink(path)
+        regular = (not link) and os.path.isfile(path)
         listed = service_id in ids
-        if not existed and not listed:
+        if not link and not regular and not listed:
             raise SavedServicesError("saved service record was not found")
-        if existed:
-            os.remove(path)
+        if link or regular:
+            os.unlink(path)
             _fsync_directory(directory)
         if listed:
             remaining = [item for item in ids if item != service_id]
@@ -340,13 +356,39 @@ class SavedServices(object):
                 ) from None
         return directory
 
-    def _record_path(self, directory, service_id):
+    def _service_record_path(self, directory, service_id):
+        """
+        Return the record path for a validated id.
+
+        The final path component is not followed, so a symlink stays inside
+        this check even when its target is outside the archive.
+        """
         if (
             type(service_id) is not str
             or _SERVICE_ID_RE.fullmatch(service_id) is None
         ):
             raise SavedServicesError("invalid service_id")
         record_path = os.path.join(directory, service_id + ".json")
+        if os.path.basename(record_path) != service_id + ".json":
+            raise SavedServicesError(
+                "record path is outside the archive directory"
+            )
+        directory_real = os.path.realpath(directory)
+        parent_real = os.path.realpath(os.path.dirname(record_path))
+        try:
+            inside = (
+                os.path.commonpath([directory_real, parent_real]) == directory_real
+            )
+        except ValueError:
+            inside = False
+        if not inside:
+            raise SavedServicesError(
+                "record path is outside the archive directory"
+            )
+        return record_path
+
+    def _record_path(self, directory, service_id):
+        record_path = self._service_record_path(directory, service_id)
         if os.path.islink(record_path):
             raise SavedServicesError("record file is a symlink")
         directory_real = os.path.realpath(directory)
@@ -357,7 +399,7 @@ class SavedServices(object):
             )
         except ValueError:
             inside = False
-        if not inside or os.path.basename(record_path) != service_id + ".json":
+        if not inside:
             raise SavedServicesError(
                 "record path is outside the archive directory"
             )
