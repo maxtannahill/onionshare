@@ -231,6 +231,12 @@ def save_identity_to_saved_services(common, parent, identity):
         except SavedServicesError as replace_error:
             Alert(common, _archive_failure_message(replace_error))
             return False
+        except Exception:
+            Alert(common, strings._("gui_identity_backup_archive_error"))
+            return False
+    except Exception:
+        Alert(common, strings._("gui_identity_backup_archive_error"))
+        return False
 
     Alert(common, strings._("gui_identity_backup_archive_saved"))
     return True
