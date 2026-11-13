@@ -33,7 +33,7 @@ from onionshare.tab.tab import Tab
 from onionshare.tab_widget import TabWidget
 from onionshare.widgets import Alert
 
-from .gui_base_test import GuiBaseTest
+from .gui_base_test import GuiBaseTest, bind_gui_case
 
 
 _MODE_CLASS = {
@@ -994,10 +994,9 @@ def saved_services_case():
 def test_symlinked_archive_directory_shows_list_error(
     saved_services_case, caplog, capsys
 ):
-    case = saved_services_case("run_symlinked_archive_list_error")
-    case.caplog = caplog
-    case.capsys = capsys
-    case.setUp()
+    case = bind_gui_case(
+        saved_services_case, "run_symlinked_archive_list_error", caplog, capsys
+    )
     try:
         case.run_symlinked_archive_list_error()
     finally:
@@ -1007,10 +1006,9 @@ def test_symlinked_archive_directory_shows_list_error(
 def test_damaged_saved_service_row_can_be_deleted(
     saved_services_case, caplog, capsys
 ):
-    case = saved_services_case("run_damaged_record_can_be_deleted")
-    case.caplog = caplog
-    case.capsys = capsys
-    case.setUp()
+    case = bind_gui_case(
+        saved_services_case, "run_damaged_record_can_be_deleted", caplog, capsys
+    )
     try:
         case.run_damaged_record_can_be_deleted()
     finally:
@@ -1018,10 +1016,7 @@ def test_damaged_saved_service_row_can_be_deleted(
 
 
 def test_manager_empty_state_and_disabled_actions(saved_services_case, caplog, capsys):
-    case = saved_services_case("run_empty_manager")
-    case.caplog = caplog
-    case.capsys = capsys
-    case.setUp()
+    case = bind_gui_case(saved_services_case, "run_empty_manager", caplog, capsys)
     try:
         case.run_empty_manager()
     finally:
@@ -1031,10 +1026,9 @@ def test_manager_empty_state_and_disabled_actions(saved_services_case, caplog, c
 def test_post_commit_oserror_reloads_saved_services_table(
     saved_services_case, caplog, capsys
 ):
-    case = saved_services_case("run_post_commit_oserror_reloads_table")
-    case.caplog = caplog
-    case.capsys = capsys
-    case.setUp()
+    case = bind_gui_case(
+        saved_services_case, "run_post_commit_oserror_reloads_table", caplog, capsys
+    )
     try:
         case.run_post_commit_oserror_reloads_table()
     finally:
@@ -1043,10 +1037,7 @@ def test_post_commit_oserror_reloads_saved_services_table(
 
 @pytest.mark.parametrize("mode", ["share", "receive", "website", "chat"])
 def test_open_saved_service_stays_stopped(saved_services_case, mode, caplog, capsys):
-    case = saved_services_case("run_open_saved_service")
-    case.caplog = caplog
-    case.capsys = capsys
-    case.setUp()
+    case = bind_gui_case(saved_services_case, "run_open_saved_service", caplog, capsys)
     try:
         case.run_open_saved_service(mode)
     finally:
