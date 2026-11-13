@@ -182,6 +182,9 @@ class DownloadMode(Mode):
         self.mode_settings_widget.public_checkbox.hide()
         self.mode_settings_widget.advanced_widget.hide()
         self.mode_settings_widget.toggle_advanced_button.hide()
+        # Download is a client of someone else's service and has no identity.
+        self.mode_settings_widget.export_identity_backup_button.hide()
+        self.mode_settings_widget.save_to_saved_services_button.hide()
 
         # Server status
         self.server_status.set_mode("download")
