@@ -759,6 +759,19 @@ class Tab(QtWidgets.QWidget):
         else:
             return None
 
+    def _finish_identity_backup(self):
+        """
+        Finish an in-progress identity export before this tab is destroyed.
+        """
+        mode = self.get_mode()
+        if mode is None:
+            return True
+        widget = getattr(mode, "mode_settings_widget", None)
+        shutdown = getattr(widget, "shutdown_identity_backup", None)
+        if shutdown is None:
+            return True
+        return shutdown()
+
     def close_tab(self):
         self.common.log("Tab", "close_tab")
         if self.mode is None:
@@ -769,7 +782,7 @@ class Tab(QtWidgets.QWidget):
         else:
             server_status = self.get_mode().server_status
             if server_status.status == server_status.STATUS_STOPPED:
-                return True
+                return self._finish_identity_backup()
             else:
                 if self.mode == self.common.gui.MODE_SHARE:
                     dialog_text = strings._("gui_close_tab_warning_share_description")
@@ -791,7 +804,7 @@ class Tab(QtWidgets.QWidget):
 
         # Close
         if self.close_dialog.clickedButton() == self.close_dialog.accept_button:
-            return True
+            return self._finish_identity_backup()
         # Cancel
         else:
             self.common.log("Tab", "close_tab", "cancel, keeping tab open")
@@ -799,6 +812,7 @@ class Tab(QtWidgets.QWidget):
 
     def cleanup(self):
         self.common.log("Tab", "cleanup", f"tab_id={self.tab_id}")
+        self._finish_identity_backup()
         if self.get_mode():
             if self.get_mode().is_server:
                 if self.get_mode().web_thread:

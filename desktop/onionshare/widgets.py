@@ -147,6 +147,17 @@ class Image(qrcode.image.base.BaseImage):
         pass
 
 
+def qr_code_pixmap(text):
+    """
+    Return a QR code pixmap for arbitrary text.
+
+    Uses the same qrcode defaults as the address and client-auth dialogs
+    (error correction M). Callers that need a dialog should keep using
+    QRCodeDialog; this helper only builds the image.
+    """
+    return qrcode.make(text, image_factory=Image).pixmap()
+
+
 class QRCodeDialog(QtWidgets.QDialog):
     """
     A dialog showing a QR code.
@@ -164,7 +175,7 @@ class QRCodeDialog(QtWidgets.QDialog):
         self.qr_label_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
         self.qr_label = QtWidgets.QLabel(self)
-        self.qr_label.setPixmap(qrcode.make(text, image_factory=Image).pixmap())
+        self.qr_label.setPixmap(qr_code_pixmap(text))
         self.qr_label.setScaledContents(True)
         self.qr_label.setFixedSize(350, 350)
 

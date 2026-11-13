@@ -20,8 +20,17 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from PySide6 import QtCore, QtWidgets
 
+from onionshare_cli.identity_backup import IdentityBackupError
+
 from ... import strings
 from ...gui_common import GuiCommon
+from ...identity_backup_dialog import (
+    ExportIdentityBackupDialog,
+    generate_passphrase,
+    identity_for_open_tab,
+    save_identity_to_saved_services,
+)
+from ...widgets import Alert
 
 
 class ModeSettingsWidget(QtWidgets.QScrollArea):
@@ -83,6 +92,25 @@ class ModeSettingsWidget(QtWidgets.QScrollArea):
             self.public_checkbox.setCheckState(QtCore.Qt.CheckState.Checked)
         else:
             self.public_checkbox.setCheckState(QtCore.Qt.CheckState.Unchecked)
+
+        # Export stays on this widget, which is shown while the server is
+        # stopped (before the first start and again after stop). Enabled
+        # state follows onion.private_key and is refreshed from update_ui
+        # and from the server status signals once the mode exists.
+        self._identity_backup_status_connected = False
+        self.identity_backup_dialog = None
+        self.export_identity_backup_button = QtWidgets.QPushButton(
+            strings._("mode_settings_export_identity_backup_button")
+        )
+        self.export_identity_backup_button.clicked.connect(
+            self.export_identity_backup_clicked
+        )
+        self.save_to_saved_services_button = QtWidgets.QPushButton(
+            strings._("mode_settings_save_to_saved_services_button")
+        )
+        self.save_to_saved_services_button.clicked.connect(
+            self.save_to_saved_services_clicked
+        )
 
         # Title
         title_label = QtWidgets.QLabel(strings._("mode_settings_title_label"))
@@ -181,6 +209,8 @@ class ModeSettingsWidget(QtWidgets.QScrollArea):
         layout.addWidget(self.persistent_checkbox)
         layout.addWidget(self.persistent_autostart_on_launch_checkbox)
         layout.addWidget(self.public_checkbox)
+        layout.addWidget(self.export_identity_backup_button)
+        layout.addWidget(self.save_to_saved_services_button)
         layout.addWidget(self.advanced_widget)
         layout.addWidget(self.toggle_advanced_button)
         layout.addStretch()
@@ -194,6 +224,29 @@ class ModeSettingsWidget(QtWidgets.QScrollArea):
         self.setWidget(main_widget)
 
         self.update_ui()
+        QtCore.QTimer.singleShot(0, self._connect_identity_backup_status)
+
+    def event(self, event):
+        # deleteLater delivers DeferredDelete before the C++ object is destroyed.
+        # Finish a live export thread here so the worker is not destroyed mid-run.
+        if event.type() == QtCore.QEvent.Type.DeferredDelete:
+            self.shutdown_identity_backup()
+        return super(ModeSettingsWidget, self).event(event)
+
+    def shutdown_identity_backup(self):
+        """
+        Wait out any export encryption before this widget or its tab is destroyed.
+
+        Returns False when the worker is still running after the timed wait.
+        The caller should keep the tab open in that case.
+        """
+        dialog = getattr(self, "identity_backup_dialog", None)
+        if dialog is None:
+            return True
+        try:
+            return dialog.shutdown_encrypt_thread()
+        except RuntimeError:
+            return True
 
     def update_ui(self):
         # Update text on advanced group toggle button
@@ -205,6 +258,73 @@ class ModeSettingsWidget(QtWidgets.QScrollArea):
             self.toggle_advanced_button.setText(
                 strings._("mode_settings_advanced_toggle_show")
             )
+        self.refresh_identity_backup_buttons()
+
+    def showEvent(self, event):
+        super(ModeSettingsWidget, self).showEvent(event)
+        self.refresh_identity_backup_buttons()
+        self._connect_identity_backup_status()
+
+    def _has_onion_private_key(self):
+        try:
+            return bool(self.settings.get("onion", "private_key"))
+        except Exception:
+            return False
+
+    def refresh_identity_backup_buttons(self):
+        """
+        Enable export only when an onion private key is stored on the tab.
+
+        ServerStatus.update calls update_ui whenever the server is not
+        started, including after stop. server_started_finished is also
+        connected so the first start (which stores the key) refreshes the
+        buttons even while this panel is hidden.
+        """
+        enabled = self._has_onion_private_key()
+        self.export_identity_backup_button.setEnabled(enabled)
+        self.save_to_saved_services_button.setEnabled(enabled)
+
+    def _connect_identity_backup_status(self):
+        if self._identity_backup_status_connected:
+            return
+        get_mode = getattr(self.tab, "get_mode", None)
+        if get_mode is None:
+            return
+        try:
+            mode = get_mode()
+        except Exception:
+            return
+        server_status = getattr(mode, "server_status", None)
+        if server_status is None:
+            return
+        server_status.server_started_finished.connect(
+            self.refresh_identity_backup_buttons
+        )
+        server_status.server_stopped.connect(self.refresh_identity_backup_buttons)
+        self._identity_backup_status_connected = True
+        self.refresh_identity_backup_buttons()
+
+    def export_identity_backup_clicked(self):
+        self.common.log("ModeSettingsWidget", "export_identity_backup_clicked")
+        try:
+            identity = identity_for_open_tab(self.settings, self.tab.mode)
+        except IdentityBackupError:
+            Alert(self.common, strings._("gui_identity_backup_invalid_identity"))
+            return
+        passphrase = generate_passphrase()
+        self.identity_backup_dialog = ExportIdentityBackupDialog(
+            self.common, identity, passphrase, parent=self
+        )
+        self.identity_backup_dialog.exec()
+
+    def save_to_saved_services_clicked(self):
+        self.common.log("ModeSettingsWidget", "save_to_saved_services_clicked")
+        try:
+            identity = identity_for_open_tab(self.settings, self.tab.mode)
+        except IdentityBackupError:
+            Alert(self.common, strings._("gui_identity_backup_invalid_identity"))
+            return
+        save_identity_to_saved_services(self.common, self, identity)
 
     def title_editing_finished(self):
         if self.title_lineedit.text().strip() == "":
