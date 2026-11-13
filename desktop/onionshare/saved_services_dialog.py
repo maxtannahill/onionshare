@@ -25,7 +25,9 @@ client-auth keys inside a record are plaintext. This archive is not an
 encrypted backup. The disclosure in this dialog says so.
 
 Open calls ``TabWidget.open_saved_service`` and does not call
-``start_server``.
+``start_server``. Import backup opens ImportIdentityDialog, which
+decrypts on a worker thread and then calls that same helper. Neither
+path starts a server.
 """
 
 import re
@@ -37,6 +39,7 @@ from onionshare_cli.saved_services import SavedServices, SavedServicesError
 
 from . import strings
 from .identity_backup_dialog import ExportIdentityBackupDialog
+from .identity_import_dialog import ImportIdentityDialog
 from .widgets import Alert
 
 
@@ -148,6 +151,13 @@ class SavedServicesDialog(QtWidgets.QDialog):
         self.resize(840, 480)
         self.setMinimumSize(640, 360)
 
+        self.import_button = QtWidgets.QPushButton(
+            strings._("gui_saved_services_import_button")
+        )
+        self.import_button.setObjectName("saved_services_import_button")
+        self.import_button.setDefault(True)
+        self.import_button.setAutoDefault(True)
+        self.import_button.clicked.connect(self.import_clicked)
         self.close_button = QtWidgets.QPushButton(
             strings._("gui_saved_services_close_button")
         )
@@ -155,6 +165,7 @@ class SavedServicesDialog(QtWidgets.QDialog):
         self.close_button.clicked.connect(self.reject)
         header = QtWidgets.QHBoxLayout()
         header.setSpacing(12)
+        header.addWidget(self.import_button)
         header.addStretch()
         header.addWidget(self.close_button)
 
@@ -290,6 +301,26 @@ class SavedServicesDialog(QtWidgets.QDialog):
 
     def showEvent(self, event):
         super(SavedServicesDialog, self).showEvent(event)
+        self.import_button.setDefault(True)
+
+    def import_clicked(self):
+        """Open the backup importer. It decrypts, archives, then opens stopped."""
+        self.common.log("SavedServicesDialog", "import_clicked")
+        previous = self.import_dialog
+        if previous is not None:
+            try:
+                if not previous.shutdown_decrypt_thread():
+                    return
+            except RuntimeError:
+                pass
+        self.import_dialog = ImportIdentityDialog(
+            self.common,
+            self.tab_widget,
+            on_imported=self.reload,
+            parent=self,
+        )
+        self.import_dialog.exec()
+        self.reload()
 
     def shutdown_identity_import(self, abandon=False):
         """

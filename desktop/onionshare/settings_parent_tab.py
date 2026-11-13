@@ -59,6 +59,25 @@ class SettingsParentTab(QtWidgets.QTabWidget):
         self.setUsesScrollButtons(False)
         self.setCurrentIndex(self.current_tab_id)
 
+    def shutdown_identity_import(self, abandon=False):
+        """Wait out an import decrypt on the general settings page."""
+        for index in range(self.count()):
+            page = self.widget(index)
+            shutdown = getattr(page, "shutdown_identity_import", None)
+            if shutdown is None:
+                continue
+            try:
+                if not shutdown(abandon):
+                    return False
+            except RuntimeError:
+                continue
+        return True
+
+    def event(self, event):
+        if event.type() == QtCore.QEvent.Type.DeferredDelete:
+            self.shutdown_identity_import(abandon=True)
+        return super(SettingsParentTab, self).event(event)
+
 
 class TabBar(QtWidgets.QTabBar):
     """
