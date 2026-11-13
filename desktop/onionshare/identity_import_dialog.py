@@ -77,6 +77,7 @@ class _AbandonedThreadKeeper(QtCore.QObject):
         thread = self.sender()
         if thread is None:
             return
+        _drop_worker_identity(thread)
         try:
             self._threads.remove(thread)
         except ValueError:
@@ -98,6 +99,17 @@ def _retain_thread(thread):
     if _abandoned_thread_keeper is None:
         _abandoned_thread_keeper = _AbandonedThreadKeeper()
     _abandoned_thread_keeper.retain(thread)
+
+
+def _drop_worker_identity(thread):
+    """Drop a discarded decrypt result. This does not zero memory."""
+    if thread is None:
+        return
+    try:
+        if hasattr(thread, "_identity"):
+            thread._identity = None
+    except RuntimeError:
+        pass
 
 
 _IDENTITY_KEYS = (
@@ -625,6 +637,7 @@ class ImportIdentityDialog(QtWidgets.QDialog):
             except RuntimeError:
                 continue
             if not running:
+                _drop_worker_identity(thread)
                 continue
             finished = thread.wait(_DECRYPT_THREAD_WAIT_MS)
             try:
@@ -640,6 +653,7 @@ class ImportIdentityDialog(QtWidgets.QDialog):
                 self._accepting_results = True
                 self._reconnect_thread(self.decrypt_thread)
                 return False
+            _drop_worker_identity(thread)
 
         if abandoned:
             # Do not reconnect. A later close must not wait or re-arm.
@@ -652,11 +666,21 @@ class ImportIdentityDialog(QtWidgets.QDialog):
         self._shutting_down = False
         return True
 
+    def _clear_sensitive_fields(self):
+        """Clear the passphrase field. This does not zero memory."""
+        edit = getattr(self, "passphrase_edit", None)
+        if edit is not None:
+            try:
+                edit.setText("")
+            except RuntimeError:
+                pass
+
     def accept(self):
         if self._close_in_progress:
             return
         if not self.shutdown_decrypt_thread():
             return
+        self._clear_sensitive_fields()
         self._close_in_progress = True
         super(ImportIdentityDialog, self).accept()
 
@@ -664,10 +688,12 @@ class ImportIdentityDialog(QtWidgets.QDialog):
         # closeEvent's QDialog implementation calls reject. The outer close
         # already waited; calling wait again from here would nest.
         if self._close_in_progress:
+            self._clear_sensitive_fields()
             super(ImportIdentityDialog, self).reject()
             return
         if not self.shutdown_decrypt_thread():
             return
+        self._clear_sensitive_fields()
         self._close_in_progress = True
         super(ImportIdentityDialog, self).reject()
 
@@ -678,5 +704,6 @@ class ImportIdentityDialog(QtWidgets.QDialog):
         if not self.shutdown_decrypt_thread():
             event.ignore()
             return
+        self._clear_sensitive_fields()
         self._close_in_progress = True
         super(ImportIdentityDialog, self).closeEvent(event)

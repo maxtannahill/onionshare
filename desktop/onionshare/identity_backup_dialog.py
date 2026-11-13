@@ -567,11 +567,24 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         self._shutting_down = False
         return True
 
+    def _clear_sensitive_fields(self):
+        """Drop identity and passphrase references. This does not zero memory."""
+        self.identity = None
+        self.passphrase = None
+        self._next_passphrase = None
+        label = getattr(self, "passphrase_label", None)
+        if label is not None:
+            try:
+                label.setText("")
+            except RuntimeError:
+                pass
+
     def accept(self):
         if self._close_in_progress:
             return
         if not self.shutdown_encrypt_thread():
             return
+        self._clear_sensitive_fields()
         self._close_in_progress = True
         super(ExportIdentityBackupDialog, self).accept()
 
@@ -579,10 +592,12 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         # closeEvent's QDialog implementation calls reject. The outer close
         # already waited; calling wait again from here would nest.
         if self._close_in_progress:
+            self._clear_sensitive_fields()
             super(ExportIdentityBackupDialog, self).reject()
             return
         if not self.shutdown_encrypt_thread():
             return
+        self._clear_sensitive_fields()
         self._close_in_progress = True
         super(ExportIdentityBackupDialog, self).reject()
 
@@ -593,6 +608,7 @@ class ExportIdentityBackupDialog(QtWidgets.QDialog):
         if not self.shutdown_encrypt_thread():
             event.ignore()
             return
+        self._clear_sensitive_fields()
         self._close_in_progress = True
         super(ExportIdentityBackupDialog, self).closeEvent(event)
 

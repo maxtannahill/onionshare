@@ -1245,3 +1245,66 @@ class TestIdentityBackupGui(GuiBaseTest):
                 dialog.close()
             except RuntimeError:
                 pass
+
+    def test_reject_clears_export_identity_and_passphrase(self):
+        def fast(identity, passphrase):
+            return "{}"
+
+        with mock.patch.object(identity_backup_dialog, "encrypt_identity", fast):
+            dialog = identity_backup_dialog.ExportIdentityBackupDialog(
+                self.gui.common,
+                _fixture_identity(),
+                "alpha-bravo-charlie-delta-echo-foxtrot",
+            )
+            self._dialog = dialog
+            self._wait_until(
+                lambda: (not dialog.is_busy) and dialog.passphrase_label.text() != ""
+            )
+        dialog.reject()
+        if (
+            dialog.identity is not None
+            or dialog.passphrase is not None
+            or dialog._next_passphrase is not None
+        ):
+            raise AssertionError("export dialog kept identity or passphrase")
+        if dialog.passphrase_label.text() != "":
+            raise AssertionError("passphrase label was not cleared")
+
+    def test_reject_clears_import_passphrase(self):
+        dialog = ImportIdentityDialog(self.gui.common, self.gui.tabs)
+        dialog.passphrase_edit.setText("alpha-bravo-charlie-delta-echo-foxtrot")
+        dialog.reject()
+        if dialog.passphrase_edit.text() != "":
+            raise AssertionError("passphrase field was not cleared")
+        dialog.deleteLater()
+
+    def test_shutdown_during_successful_decrypt_drops_worker_identity(self):
+        started = threading.Event()
+
+        def slow(text, passphrase):
+            started.set()
+            time.sleep(0.4)
+            return {"discarded": True}
+
+        dialog = ImportIdentityDialog(self.gui.common, self.gui.tabs)
+        dialog.passphrase_edit.setText("alpha-bravo-charlie-delta-echo-foxtrot")
+        try:
+            with mock.patch.object(
+                identity_import_dialog, "decrypt_identity", slow
+            ):
+                dialog._start_decrypt("{}", "alpha-bravo-charlie-delta-echo-foxtrot")
+                self._wait_until(started.is_set)
+                thread = dialog.decrypt_thread
+                dialog.shutdown_decrypt_thread()
+            if getattr(thread, "_identity", None) is not None:
+                raise AssertionError("worker kept a discarded identity")
+            dialog.reject()
+            if dialog.passphrase_edit.text() != "":
+                raise AssertionError("passphrase field was not cleared")
+        finally:
+            try:
+                if dialog.decrypt_thread is not None and dialog.decrypt_thread.isRunning():
+                    dialog.decrypt_thread.wait(5000)
+                dialog.close()
+            except RuntimeError:
+                pass
