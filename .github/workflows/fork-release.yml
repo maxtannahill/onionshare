@@ -1,8 +1,10 @@
 # Fork release workflow. This file is the only workflow that runs for a
-# tag v2.7.2-fork.*. Pushing the release branch matches nothing here:
-# workflow_dispatch is not used, because GitHub only offers that for
-# workflow files on the default branch. There is no pull_request trigger
-# and no schedule.
+# tag v2.7.2-fork.*, including v2.7.2-fork.2. Pushing the release branch
+# matches nothing here: workflow_dispatch is not used, because GitHub only
+# offers that for workflow files on the default branch. There is no
+# pull_request trigger and no schedule.
+# macOS Poetry is pointed at the Python.org 3.12.9 framework. Flatpak and
+# Snap stay investigative builds and are not draft-release inputs.
 name: Fork release (unsigned draft)
 
 "on":
@@ -285,19 +287,34 @@ jobs:
       - name: Install poetry 2.1.2
         run: |
           set -euo pipefail
-          curl -sSL https://install.python-poetry.org | POETRY_VERSION=2.1.2 python3 -
+          # The Intel runner's python3 was 3.12 after this package. On arm64,
+          # Homebrew python3 is 3.15 and stays ahead of the framework on PATH.
+          # Install Poetry with the framework interpreter, never unqualified python3.
+          PY312="/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12"
+          test -x "$PY312"
+          "$PY312" -c 'import sys; assert sys.version_info[:2]==(3,12) and sys.version.startswith("3.12."), sys.version'
+          curl -sSL https://install.python-poetry.org | POETRY_VERSION=2.1.2 "$PY312" -
           "$HOME/Library/Application Support/pypoetry/venv/bin/poetry" --version | grep -F "2.1.2"
 
       - name: Restore cache - poetry
         uses: actions/cache@v4
         with:
           path: ~/Library/Caches/pypoetry/virtualenvs
-          key: fork-${{ runner.os }}-macos-${{ matrix.label }}-poetry-${{ hashFiles('desktop/poetry.lock') }}
+          key: fork-${{ runner.os }}-macos-${{ matrix.label }}-poetry-py3129-v2-${{ hashFiles('desktop/poetry.lock') }}
 
       - name: Install poetry dependencies
         run: |
+          set -euo pipefail
           cd desktop
-          "$HOME/Library/Application Support/pypoetry/venv/bin/poetry" install --no-interaction
+          POETRY="$HOME/Library/Application Support/pypoetry/venv/bin/poetry"
+          PY312="/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12"
+          test -x "$PY312"
+          "$POETRY" env use "$PY312"
+          selected=$("$POETRY" env info -e)
+          test -n "$selected"
+          "$selected" -c 'import os, sys; real = os.path.realpath(sys.executable); base = getattr(sys, "base_prefix", ""); print(sys.version); print(real); print(base); assert sys.version_info[:2]==(3, 12), sys.version; assert sys.version.startswith("3.12."), sys.version; assert not sys.version.startswith("3.15"), sys.version; assert "/Library/Frameworks/Python.framework/Versions/3.12" in real or base.startswith("/Library/Frameworks/Python.framework/Versions/3.12"), (real, base)'
+          "$POETRY" install --no-interaction
+          "$POETRY" run python -c 'import sys; assert sys.version_info[:2]==(3,12)'
 
       - name: Restore cache - tor
         uses: actions/cache@v4
@@ -392,9 +409,12 @@ jobs:
 
       - name: Build OnionShare
         run: |
+          set -euo pipefail
           cd desktop
-          "$HOME/Library/Application Support/pypoetry/venv/bin/poetry" run python ./setup-freeze.py bdist_mac
-          "$HOME/Library/Application Support/pypoetry/venv/bin/poetry" run python ./scripts/build-macos.py cleanup-build
+          POETRY="$HOME/Library/Application Support/pypoetry/venv/bin/poetry"
+          "$POETRY" run python -c 'import os, sys; real = os.path.realpath(sys.executable); base = getattr(sys, "base_prefix", ""); print(sys.version); print(real); print(base); assert sys.version_info[:2]==(3, 12), sys.version; assert sys.version.startswith("3.12."), sys.version; assert not sys.version.startswith("3.15"), sys.version; assert "/Library/Frameworks/Python.framework/Versions/3.12" in real or base.startswith("/Library/Frameworks/Python.framework/Versions/3.12"), (real, base)'
+          "$POETRY" run python ./setup-freeze.py bdist_mac
+          "$POETRY" run python ./scripts/build-macos.py cleanup-build
 
       - name: Smoke test frozen macOS build
         run: |
@@ -635,13 +655,13 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: fork-release-flatpak
+          name: fork-investigative-flatpak
           path: ~/OnionShare-fork-*-x86_64.flatpak
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
         with:
-          name: fork-smoke-flatpak
+          name: fork-investigative-flatpak-smoke
           path: flatpak-smoke.txt
           if-no-files-found: error
 
@@ -724,13 +744,13 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: fork-release-snap
+          name: fork-investigative-snap
           path: ~/OnionShare-fork-*_amd64.snap
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
         with:
-          name: fork-smoke-snap
+          name: fork-investigative-snap-smoke
           path: snap-smoke.txt
           if-no-files-found: error
 
@@ -743,8 +763,6 @@ jobs:
       - merge-mac-universal
       - smoke-mac-universal-intel
       - package-mac-dmg
-      - build-flatpak
-      - build-snap
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -769,26 +787,94 @@ jobs:
             2.7.2-fork.*) ;;
             *) echo "unexpected tag $GITHUB_REF_NAME"; exit 1 ;;
           esac
-          find release -type f \( -name '*.msi' -o -name '*.dmg' -o -name '*.flatpak' -o -name '*.snap' \) -exec cp {} . \;
+          if find release smoke -type f \( -name '*.flatpak' -o -name '*.snap' \) | grep -q .; then
+            echo "refusing Flatpak or Snap in the draft inputs"
+            exit 1
+          fi
+          find release -type f \( -name '*.msi' -o -name '*.dmg' \) -exec cp {} . \;
           git archive --format=tar.gz --prefix=onionshare/ -o "OnionShare-fork-${TAG}.tar.gz" HEAD
-          count=$(find . -maxdepth 1 -name 'OnionShare-fork-*' | wc -l)
-          test "$count" -eq 5
+          shopt -s nullglob
+          msi=(OnionShare-fork-*-win64-UNSIGNED.msi)
+          dmg=(OnionShare-fork-*-macos-universal2-UNSIGNED.dmg)
+          src=(OnionShare-fork-*.tar.gz)
+          flatpak=(*.flatpak)
+          snap=(*.snap)
+          test "${#msi[@]}" -eq 1
+          test "${#dmg[@]}" -eq 1
+          test "${#src[@]}" -eq 1
+          test "${#flatpak[@]}" -eq 0
+          test "${#snap[@]}" -eq 0
           for file in OnionShare-fork-*; do
             case "$file" in
-              *.msi|*.dmg|*.flatpak|*.snap|*.tar.gz) ;;
+              *.msi|*.dmg|*.tar.gz) ;;
               *) echo "unexpected artifact $file"; exit 1 ;;
             esac
           done
+          onion_count=$(find . -maxdepth 1 -name 'OnionShare-fork-*' | wc -l)
+          test "$onion_count" -eq 3
           if compgen -G "*.asc" > /dev/null; then
             echo "refusing upstream signature files"
             exit 1
           fi
-          sha256sum OnionShare-fork-* | sort -k 2 > SHA256SUMS
+          sha256sum "${msi[0]}" "${dmg[0]}" "${src[0]}" | sort -k 2 > SHA256SUMS
+          test "$(grep -c . SHA256SUMS)" -eq 3
+          asset_count=$(find . -maxdepth 1 \( -name 'OnionShare-fork-*' -o -name 'SHA256SUMS' \) | wc -l)
+          test "$asset_count" -eq 4
           python3 desktop/scripts/fork-release-notes.py \
             --sha "$GITHUB_SHA" \
             --tag "$GITHUB_REF_NAME" \
             --smoke-dir smoke \
             --output release-notes.md
+          python3 - << 'PY'
+          from pathlib import Path
+          path = Path("release-notes.md")
+          text = path.read_text(encoding="utf-8")
+          old = "The snap is built and is not uploaded to the Snap Store."
+          new = (
+              "Flatpak and Snap are excluded experimental builds and are not attached to this draft. "
+              "Flatpak single-instance FAIL (fork app ID not recognised by is_flatpak(), stale PID lock). "
+              "Snap not verified (Tor untested)."
+          )
+          if old not in text:
+              raise SystemExit("expected snap sentence missing from generated notes")
+          text = text.replace(old, new, 1)
+          section = (
+              "\n## Excluded experimental builds\n\n"
+              "Flatpak and Snap are excluded from this draft. They remain investigative builds only.\n\n"
+              "Flatpak single-instance FAIL (fork app ID not recognised by is_flatpak(), stale PID lock). "
+              "Snap not verified (Tor untested).\n\n"
+              "An 8-second GUI launch is not full application verification. "
+              "A frozen self-test is not full application verification.\n\n"
+              "NOT PERFORMED: real Tor.\n"
+              "NOT PERFORMED: GUI export/import.\n"
+              "NOT PERFORMED: QR equality.\n"
+              "NOT PERFORMED: Saved Services operations.\n"
+              "NOT PERFORMED: normal shutdown.\n"
+              "NOT PERFORMED: SmartScreen/Gatekeeper.\n"
+              "NOT PERFORMED: real-machine installation.\n\n"
+              "Windows and macOS files in this draft are unsigned.\n"
+          )
+          if "## Excluded experimental builds" not in text:
+              text = text.rstrip() + "\n" + section
+          for item in (
+              "An 8-second GUI launch is not full application verification.",
+              "A frozen self-test is not full application verification.",
+              "NOT PERFORMED: real Tor.",
+              "NOT PERFORMED: GUI export/import.",
+              "NOT PERFORMED: QR equality.",
+              "NOT PERFORMED: Saved Services operations.",
+              "NOT PERFORMED: normal shutdown.",
+              "NOT PERFORMED: SmartScreen/Gatekeeper.",
+              "NOT PERFORMED: real-machine installation.",
+              "Flatpak and Snap are excluded from this draft.",
+          ):
+              if item not in text:
+                  raise SystemExit("missing notes item: " + item)
+          lowered = text.lower()
+          if "http://" in lowered or "https://" in lowered or "begin private key" in lowered:
+              raise SystemExit("refusing notes that contain a link or a key block")
+          path.write_text(text, encoding="utf-8")
+          PY
           gh release create "$GITHUB_REF_NAME" \
             --draft \
             --title "OnionShare fork ${GITHUB_REF_NAME} unsigned draft" \
