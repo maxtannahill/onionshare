@@ -3,8 +3,10 @@
 # matches nothing here: workflow_dispatch is not used, because GitHub only
 # offers that for workflow files on the default branch. There is no
 # pull_request trigger and no schedule.
-# macOS Poetry is pointed at the Python.org 3.12.9 framework. Flatpak and
-# Snap stay investigative builds and are not draft-release inputs.
+# macOS Poetry is pointed at the Python.org 3.12.9 framework. The universal
+# merge installs Click into a temporary venv and runs macos-merge-universal.py
+# with that venv's Python. Flatpak and Snap stay investigative builds and are
+# not draft-release inputs.
 name: Fork release (unsigned draft)
 
 "on":
@@ -468,12 +470,20 @@ jobs:
       - name: Merge universal bundle and smoke the arm64 slice
         run: |
           set -euo pipefail
-          python3 -m pip install --user 'click==8.5.1'
+          # This job does not install the Python.org 3.12 framework. That
+          # installer runs only in build-mac, on other runners. macos-15 arm64
+          # image 20261104's python3 is Homebrew 3.15.2 and PEP 668 externally
+          # managed, so pip install --user fails. That same python3 can create
+          # a venv, and click==8.5.1 requires Python >=3.10. Run the merge
+          # script with the venv interpreter. Do not pass a user-site flag or
+          # the system-packages override, and do not use Homebrew pip.
+          python3 -m venv "$RUNNER_TEMP/merge-venv"
+          "$RUNNER_TEMP/merge-venv/bin/python" -m pip install 'click==8.5.1'
           mkdir -p "$HOME/tmp/intel" "$HOME/tmp/arm64" "$HOME/tmp/universal"
           tar -xzf "$HOME/downloads/onionshare-macos-intel.tar.gz" -C "$HOME/tmp/intel"
           tar -xzf "$HOME/downloads/onionshare-macos-arm64.tar.gz" -C "$HOME/tmp/arm64"
           cd desktop
-          python3 ./scripts/macos-merge-universal.py \
+          "$RUNNER_TEMP/merge-venv/bin/python" ./scripts/macos-merge-universal.py \
             "$HOME/tmp/intel/OnionShareFork.app" \
             "$HOME/tmp/arm64/OnionShareFork.app" \
             "$HOME/tmp/universal/OnionShareFork.app"
