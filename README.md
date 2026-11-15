@@ -29,6 +29,7 @@ This fork adds encrypted backups of onion service identities, plus a local list 
 
 - How to use it, and compatibility with older versions: [Identity backups and Saved Services](docs/source/advanced.rst) in `docs/source/advanced.rst`.
 - The exact v1 backup format and validation rules: the comments at the top of [`cli/onionshare_cli/identity_backup.py`](cli/onionshare_cli/identity_backup.py).
+- What has and hasn't been tested: [VERIFICATION.fork.md](VERIFICATION.fork.md).
 
 **Known limitations**
 
